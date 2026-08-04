@@ -1,9 +1,9 @@
-# Klang Language Spec (v0.1 — restart)
+# Klang Language Spec (v0.3)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
 > and the compiler in [src/](../src/) is being built to match it, one feature at a time.
-> Anything not listed under "Implemented in v0.1" below does not exist in the compiler yet.
+> Anything not listed under "Implemented today" below does not exist in the compiler yet.
 
 ## Design decisions (locked in)
 
@@ -62,7 +62,7 @@ if x > 0 {
 
 let mut i = 0
 while i < 10 {
-    println(to_string(i))
+    println("${i}")
     i = i + 1
 }
 ```
@@ -76,7 +76,7 @@ struct Point {
 }
 
 let p = Point { x: 1, y: 2 }
-println(to_string(p.x))
+println("${p.x}, ${p.y}")
 ```
 
 ### Enums, Option, Result, match
@@ -102,6 +102,59 @@ fn find_user(id: int) -> Option<User> {
 fn read_config(path: string) -> Result<Config, string> {
     let text = fs.read(path)?     // propagate error early
     return parse_config(text)
+}
+```
+
+### Arrays
+
+`[T]` is a growable array of `T`. Arrays are **references to a heap object**: passing one
+to a function, or binding it to another name, does not copy it — pushing through either
+name is visible through both. Indexing is bounds-checked at runtime; going out of range
+aborts with the index and the length rather than reading garbage.
+
+```kkg
+let nums = [3, 1, 4]
+println("${len(nums)} items, first is ${nums[0]}")
+
+let mut xs: [int] = []     // an empty literal needs to know what it holds
+push(xs, 10)
+xs[0] = 99
+
+let grid = [[1, 2], [3, 4]]   // arrays nest
+```
+
+Mutation follows the same rule as everything else: `let` is enough to read an array, but
+pushing to it or assigning into it requires `let mut`.
+
+### Loops
+
+`for ... in` walks an array or an `a..b` range (`a` inclusive, `b` exclusive). The
+iterable is evaluated exactly once. The loop variable is rebound each turn, so it is
+never `mut`.
+
+```kkg
+for n in nums        { println("${n}") }
+for i in 0..len(nums) { println("${i}: ${nums[i]}") }
+```
+
+### String interpolation
+
+`${...}` takes any expression. Values are converted for you, so the common case needs no
+`to_string` call. Write `\${` for a literal dollar-brace.
+
+```kkg
+println("${name} v${version} — ${2 + 2} items")
+```
+
+### Mutable parameters
+
+A parameter marked `mut` says the function may modify it. For an array — a reference —
+that modification is visible to the caller. For a value type like `int` or a struct, the
+function is mutating its own copy, exactly as in Go.
+
+```kkg
+fn restock(mut items: [Item], name: string) {
+    push(items, Item { name: name, qty: 1 })   // the caller sees this
 }
 ```
 
@@ -140,7 +193,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.2, Phase 1 complete)
+## Implemented today (v0.3, Phase 2 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -164,11 +217,20 @@ let received = ch.receive()
   `T = string` from the second argument
 - Variants are written unqualified (`Some(x)`, not `Option::Some(x)`)
 
+**Phase 2 additions**
+- `[T]` arrays: literals, indexing, `a[i] = v`, nesting, and generics over them
+- Bounds-checked indexing — out of range aborts with the index and the length
+- `len(...)` on arrays and strings; `push(...)` to append
+- `for x in array` and `for i in a..b`, with the iterable evaluated exactly once
+- String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
+- `mut` parameters, so a function can declare that it modifies what it was given
+- Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
 Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
-- Arrays/maps, closures, traits, modules/imports
+- Maps, closures, traits, modules/imports
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)
 - `to_string` / `==` on structs and enums (match on them instead)

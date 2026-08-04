@@ -1,0 +1,95 @@
+// Phase 2: arrays, for-in, ranges, and string interpolation.
+
+struct Item {
+    name: string,
+    qty: int,
+}
+
+fn total(items: [Item]) -> int {
+    let mut sum = 0
+    for it in items {
+        sum = sum + it.qty
+    }
+    return sum
+}
+
+// Generic over the element type — monomorphized per instantiation.
+fn firstOr<T>(xs: [T], fallback: T) -> T {
+    if len(xs) == 0 {
+        return fallback
+    }
+    return xs[0]
+}
+
+fn evens(upto: int) -> [int] {
+    let mut out: [int] = []
+    for n in 0..upto {
+        if n % 2 == 0 {
+            push(out, n)
+        }
+    }
+    return out
+}
+
+// A `mut` parameter says "I may modify what you passed me". Arrays are
+// references, so the caller sees the appended items.
+fn restock(mut items: [Item], name: string, qty: int) {
+    push(items, Item { name: name, qty: qty })
+}
+
+fn main() {
+    // Interpolation: no more `+ to_string(...)` noise.
+    let name = "Klang"
+    let version = 2
+    println("${name} v${version} — arrays are here")
+
+    // Literals, indexing, len.
+    let nums = [3, 1, 4, 1, 5]
+    println("nums has ${len(nums)} items, first is ${nums[0]}")
+
+    // for-in over an array.
+    let mut sum = 0
+    for n in nums {
+        sum = sum + n
+    }
+    println("sum = ${sum}")
+
+    // for-in over a range.
+    println("evens under 10: ${len(evens(10))} of them")
+    for e in evens(10) {
+        print("${e} ")
+    }
+    println("")
+
+    // Arrays are references: push through one binding is seen by all.
+    let mut basket = [Item { name: "apple", qty: 2 }]
+    push(basket, Item { name: "pear", qty: 5 })
+    restock(basket, "plum", 1)
+    for it in basket {
+        println("  ${it.qty} x ${it.name}")
+    }
+    println("total qty = ${total(basket)}")
+
+    // Index assignment, and mutation through an element.
+    let mut grid = [10, 20, 30]
+    grid[1] = 99
+    println("grid[1] is now ${grid[1]}")
+
+    // Arrays of arrays.
+    let rows = [[1, 2], [3, 4], [5, 6]]
+    let mut flat = 0
+    for row in rows {
+        for cell in row {
+            flat = flat + cell
+        }
+    }
+    println("nested sum = ${flat}")
+
+    // Generics still infer the way they should.
+    println("firstOr(nums, 0)   = ${firstOr(nums, 0)}")
+    let empty: [string] = []
+    println("firstOr([], \"n/a\") = ${firstOr(empty, "n/a")}")
+
+    // Interpolation handles arbitrary expressions, and escaping still works.
+    println("2+2 = ${2 + 2}, literal \${not interpolated}")
+}

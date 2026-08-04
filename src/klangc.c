@@ -83,13 +83,17 @@ static void fail(int line, const char *fmt, ...) {
 typedef enum {
     TK_EOF, TK_IDENT, TK_INT, TK_FLOAT, TK_STRING,
     TK_TRUE, TK_FALSE, TK_LET, TK_MUT, TK_FN, TK_STRUCT, TK_ENUM, TK_MATCH,
-    TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
-    TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
-    TK_COMMA, TK_COLON, TK_ARROW, TK_FATARROW, TK_DOT, TK_QUESTION,
+    TK_IF, TK_ELSE, TK_WHILE, TK_FOR, TK_IN, TK_RETURN,
+    TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE, TK_LBRACKET, TK_RBRACKET,
+    TK_COMMA, TK_COLON, TK_ARROW, TK_FATARROW, TK_DOT, TK_DOTDOT, TK_QUESTION,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_ANDAND, TK_OROR, TK_NOT
 } TokKind;
+
+/* One chunk of a string literal. `expr` is the source text inside `${...}`,
+   or NULL when the chunk is plain text. */
+typedef struct { char *lit; char *expr; int line; } StrPart;
 
 typedef struct {
     TokKind kind;
@@ -97,6 +101,7 @@ typedef struct {
     int64_t ival;
     double fval;
     int line;
+    Vec *parts;   /* TK_STRING with interpolation; NULL otherwise */
 } Token;
 
 typedef struct { const char *src; int pos, len, line; } Lexer;
@@ -114,7 +119,7 @@ static int lx_adv(Lexer *lx) {
 }
 static char *dupn(const char *s, int n) { char *r = malloc((size_t)n + 1); memcpy(r, s, (size_t)n); r[n] = 0; return r; }
 static Token make_tok(TokKind k, int line) {
-    Token t; t.kind = k; t.text = NULL; t.ival = 0; t.fval = 0; t.line = line; return t;
+    Token t; t.kind = k; t.text = NULL; t.ival = 0; t.fval = 0; t.line = line; t.parts = NULL; return t;
 }
 
 static Token lex_next(Lexer *lx) {
@@ -139,6 +144,7 @@ static Token lex_next(Lexer *lx) {
             {"true", TK_TRUE}, {"false", TK_FALSE}, {"let", TK_LET}, {"mut", TK_MUT},
             {"fn", TK_FN}, {"struct", TK_STRUCT}, {"enum", TK_ENUM}, {"match", TK_MATCH},
             {"if", TK_IF}, {"else", TK_ELSE}, {"while", TK_WHILE}, {"return", TK_RETURN},
+            {"for", TK_FOR}, {"in", TK_IN},
         };
         for (size_t i = 0; i < sizeof kws / sizeof kws[0]; i++) {
             if (strcmp(text, kws[i].kw) == 0) { free(text); return make_tok(kws[i].k, line); }
@@ -165,8 +171,47 @@ static Token lex_next(Lexer *lx) {
     if (c == '"') {
         lx_adv(lx);
         SB sb; sb_init(&sb);
+        Vec *parts = NULL;   /* allocated lazily, only when `${` shows up */
         while (lx_peek(lx) != -1 && lx_peek(lx) != '"') {
-            int ch = lx_adv(lx);
+            int ch = lx_peek(lx);
+            if (ch == '$' && lx_peek2(lx) == '{') {
+                lx_adv(lx); lx_adv(lx);
+                if (!parts) { parts = malloc(sizeof(Vec)); vec_init(parts, sizeof(StrPart)); }
+                if (sb.len > 0) {
+                    StrPart *lp = vec_push(parts);
+                    lp->lit = sb.data; lp->expr = NULL; lp->line = line;
+                    sb_init(&sb);
+                }
+                /* Capture the source between the braces; nesting and nested string
+                   literals are skipped so `${f("}")}` and `${a[b]}` survive. */
+                int depth = 1, start = lx->pos, eline = lx->line;
+                while (lx_peek(lx) != -1) {
+                    int e = lx_peek(lx);
+                    if (e == '"') {                 /* skip a nested string literal */
+                        lx_adv(lx);
+                        while (lx_peek(lx) != -1 && lx_peek(lx) != '"') {
+                            if (lx_peek(lx) == '\\') lx_adv(lx);
+                            lx_adv(lx);
+                        }
+                        if (lx_peek(lx) != '"') fail(eline, "unterminated string inside '${...}'");
+                        lx_adv(lx);
+                        continue;
+                    }
+                    if (e == '{') depth++;
+                    if (e == '}') { depth--; if (depth == 0) break; }
+                    lx_adv(lx);
+                }
+                if (lx_peek(lx) != '}') fail(eline, "unterminated '${' in string literal");
+                char *expr_src = dupn(lx->src + start, lx->pos - start);
+                lx_adv(lx);   /* consume '}' */
+                bool blank = true;
+                for (char *q = expr_src; *q; q++) if (!isspace((unsigned char)*q)) blank = false;
+                if (blank) fail(eline, "empty '${}' in string literal");
+                StrPart *ep = vec_push(parts);
+                ep->lit = NULL; ep->expr = expr_src; ep->line = eline;
+                continue;
+            }
+            lx_adv(lx);
             char buf[2] = {0, 0};
             if (ch == '\\') {
                 int esc = lx_adv(lx);
@@ -174,6 +219,7 @@ static Token lex_next(Lexer *lx) {
                     case 'n': buf[0] = '\n'; break;
                     case 't': buf[0] = '\t'; break;
                     case '"': buf[0] = '"'; break;
+                    case '$': buf[0] = '$'; break;
                     case '\\': buf[0] = '\\'; break;
                     default: buf[0] = (char)esc; break;
                 }
@@ -184,12 +230,20 @@ static Token lex_next(Lexer *lx) {
         lx_adv(lx);
         Token t = make_tok(TK_STRING, line);
         t.text = sb.data;
+        if (parts) {
+            if (sb.len > 0) {
+                StrPart *lp = vec_push(parts);
+                lp->lit = sb.data; lp->expr = NULL; lp->line = line;
+            }
+            t.parts = parts;
+        }
         return t;
     }
 
 #define TWO(a, b, k) if (c == (a) && lx_peek2(lx) == (b)) { lx_adv(lx); lx_adv(lx); return make_tok(k, line); }
     TWO('-', '>', TK_ARROW)
     TWO('=', '>', TK_FATARROW)
+    TWO('.', '.', TK_DOTDOT)
     TWO('=', '=', TK_EQEQ)
     TWO('!', '=', TK_NEQ)
     TWO('<', '=', TK_LE)
@@ -204,6 +258,8 @@ static Token lex_next(Lexer *lx) {
         case ')': return make_tok(TK_RPAREN, line);
         case '{': return make_tok(TK_LBRACE, line);
         case '}': return make_tok(TK_RBRACE, line);
+        case '[': return make_tok(TK_LBRACKET, line);
+        case ']': return make_tok(TK_RBRACKET, line);
         case ',': return make_tok(TK_COMMA, line);
         case ':': return make_tok(TK_COLON, line);
         case '.': return make_tok(TK_DOT, line);
@@ -223,13 +279,13 @@ static Token lex_next(Lexer *lx) {
 
 /* ───────────────────────── types ───────────────────────── */
 
-typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_VAR, TY_UNKNOWN } TyKind;
+typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_VAR, TY_UNKNOWN } TyKind;
 
 typedef struct Type Type;
 struct Type {
     TyKind kind;
     char *name;  /* TY_NAMED: struct/enum name.  TY_VAR: type-parameter name. */
-    Vec args;    /* Vec<Type*> — generic arguments for TY_NAMED */
+    Vec args;    /* Vec<Type*> — generic arguments for TY_NAMED, element type for TY_ARRAY */
 };
 
 static Type *ty_new(TyKind k) {
@@ -247,9 +303,12 @@ static Type *ty_string(void) { return ty_prim(TY_STRING); }
 static Type *ty_unknown(void) { return ty_prim(TY_UNKNOWN); }
 static Type *ty_named(const char *name) { Type *t = ty_new(TY_NAMED); t->name = strdup(name); return t; }
 static Type *ty_var(const char *name) { Type *t = ty_new(TY_VAR); t->name = strdup(name); return t; }
+static Type *ty_array(Type *elem) { Type *t = ty_new(TY_ARRAY); VEC_PUSH_PTR(&t->args, elem); return t; }
+static Type *ty_elem(const Type *t) { return VEC_PTR(&t->args, 0, Type); }
 
 static bool ty_eq(const Type *a, const Type *b) {
     if (a->kind != b->kind) return false;
+    if (a->kind == TY_ARRAY) return ty_eq(ty_elem(a), ty_elem(b));
     if (a->kind == TY_NAMED || a->kind == TY_VAR) {
         if (strcmp(a->name, b->name) != 0) return false;
         if (a->args.count != b->args.count) return false;
@@ -276,6 +335,7 @@ static const char *ty_str(const Type *t) {
         case TY_BOOL: return "bool";
         case TY_STRING: return "string";
         case TY_UNKNOWN: return "<unknown>";
+        case TY_ARRAY: snprintf(buf, 256, "[%s]", ty_str(ty_elem(t))); return buf;
         default: break;
     }
     if (t->args.count == 0) { snprintf(buf, 256, "%s", t->name); return buf; }
@@ -296,6 +356,7 @@ static void ty_mangle_into(const Type *t, SB *sb) {
         case TY_BOOL: sb_append(sb, "bool"); return;
         case TY_STRING: sb_append(sb, "string"); return;
         case TY_VAR: sb_append(sb, t->name); return;
+        case TY_ARRAY: sb_append(sb, "arr_"); ty_mangle_into(ty_elem(t), sb); return;
         default: break;
     }
     sb_append(sb, t->name);
@@ -311,7 +372,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY
+    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -350,24 +411,26 @@ struct Expr {
     Vec arms;        /* Vec<MatchArm> */
 };
 
-typedef enum { ST_LET, ST_ASSIGN, ST_IF, ST_WHILE, ST_RETURN, ST_EXPR, ST_BLOCK } StmtKind;
+typedef enum { ST_LET, ST_ASSIGN, ST_IF, ST_WHILE, ST_FOR, ST_RETURN, ST_EXPR, ST_BLOCK } StmtKind;
 
 typedef struct { Expr *cond; Vec body; } CondBlock;
 
 struct Stmt {
     StmtKind kind;
     int line;
-    char *name;
+    char *name;       /* ST_LET / ST_FOR: bound variable */
     bool is_mut;
     bool has_type;
+    bool is_range;    /* ST_FOR: `for i in a..b` rather than over an array */
     Type *decl_type;
-    Expr *expr;
-    Vec assign_path;  /* Vec<char*> */
+    Expr *expr;       /* ST_FOR: the array, or the range's lower bound */
+    Expr *expr2;      /* ST_FOR: the range's upper bound */
+    Expr *target;     /* ST_ASSIGN: lvalue being assigned to */
     Vec cond_blocks;  /* Vec<CondBlock> */
     Vec body;         /* Vec<Stmt*> */
 };
 
-typedef struct { char *name; Type *type; } Field;
+typedef struct { char *name; Type *type; bool is_mut; } Field;
 typedef struct { char *name; Vec payload; /* Vec<Type*> */ } Variant;
 
 typedef struct { char *name; Vec type_params; Vec fields; char *mangled; } StructDecl;
@@ -425,13 +488,17 @@ static Expr *new_expr(ExprKind k, int line) {
 static Stmt *new_stmt(StmtKind k, int line) {
     Stmt *s = calloc(1, sizeof(Stmt));
     s->kind = k; s->line = line;
-    vec_init(&s->assign_path, sizeof(char *));
     vec_init(&s->cond_blocks, sizeof(CondBlock));
     vec_init(&s->body, sizeof(Stmt *));
     return s;
 }
 
 static Type *parse_type(Parser *p) {
+    if (p_match(p, TK_LBRACKET)) {
+        Type *elem = parse_type(p);
+        p_expect(p, TK_RBRACKET);
+        return ty_array(elem);
+    }
     Token t = p_expect(p, TK_IDENT);
     if (strcmp(t.text, "int") == 0) return ty_int();
     if (strcmp(t.text, "float") == 0) return ty_float();
@@ -457,6 +524,7 @@ static Vec parse_type_params(Parser *p) {
 /* `T` parses as a named type; once we know the enclosing declaration's type
    parameters, rewrite those occurrences into real type variables. */
 static Type *bind_type_vars(Type *t, const Vec *type_params) {
+    if (t->kind == TY_ARRAY) return ty_array(bind_type_vars(ty_elem(t), type_params));
     if (t->kind != TY_NAMED) return t;
     if (t->args.count == 0) {
         for (int i = 0; i < type_params->count; i++)
@@ -513,11 +581,64 @@ static Expr *parse_match(Parser *p, int line) {
     return e;
 }
 
+/* `"a${x}b"` desugars to `"a" + to_string(x) + "b"`. to_string is a no-op on
+   strings, so every printable type interpolates without the caller saying so. */
+static Expr *parse_interp(const Token *tok) {
+    Expr *acc = NULL;
+    for (int i = 0; i < tok->parts->count; i++) {
+        StrPart *sp = vec_get(tok->parts, i);
+        Expr *piece;
+        if (sp->expr) {
+            Parser sub;
+            lexer_init(&sub.lx, sp->expr);
+            sub.lx.line = sp->line;      /* so errors point at the real source line */
+            sub.no_struct_lit = false;
+            p_advance(&sub);
+            piece = parse_expr(&sub);
+            if (!p_check(&sub, TK_EOF)) fail(sp->line, "unexpected trailing tokens inside '${...}'");
+            Expr *call = new_expr(EX_CALL, sp->line);
+            call->sval = "to_string";
+            VEC_PUSH_PTR(&call->args, piece);
+            piece = call;
+        } else {
+            piece = new_expr(EX_STRING, sp->line);
+            piece->sval = sp->lit;
+        }
+        if (!acc) { acc = piece; continue; }
+        Expr *cat = new_expr(EX_BINARY, sp->line);
+        cat->op = strdup("+");
+        cat->lhs = acc;
+        cat->rhs = piece;
+        acc = cat;
+    }
+    return acc;
+}
+
 static Expr *parse_primary(Parser *p) {
     int line = p->cur.line;
     if (p_check(p, TK_INT)) { Expr *e = new_expr(EX_INT, line); e->ival = p->cur.ival; p_advance(p); return e; }
     if (p_check(p, TK_FLOAT)) { Expr *e = new_expr(EX_FLOAT, line); e->fval = p->cur.fval; p_advance(p); return e; }
-    if (p_check(p, TK_STRING)) { Expr *e = new_expr(EX_STRING, line); e->sval = p->cur.text; p_advance(p); return e; }
+    if (p_check(p, TK_STRING)) {
+        Token tok = p->cur;
+        p_advance(p);
+        if (tok.parts) return parse_interp(&tok);
+        Expr *e = new_expr(EX_STRING, line);
+        e->sval = tok.text;
+        return e;
+    }
+    if (p_check(p, TK_LBRACKET)) {
+        Expr *e = new_expr(EX_ARRAY_LIT, line);
+        p_advance(p);
+        bool saved = p->no_struct_lit;
+        p->no_struct_lit = false;
+        while (!p_check(p, TK_RBRACKET)) {
+            VEC_PUSH_PTR(&e->args, parse_expr(p));
+            if (!p_match(p, TK_COMMA)) break;
+        }
+        p->no_struct_lit = saved;
+        p_expect(p, TK_RBRACKET);
+        return e;
+    }
     if (p_match(p, TK_TRUE)) { Expr *e = new_expr(EX_BOOL, line); e->bval = true; return e; }
     if (p_match(p, TK_FALSE)) { Expr *e = new_expr(EX_BOOL, line); e->bval = false; return e; }
     if (p_match(p, TK_MATCH)) return parse_match(p, line);
@@ -575,6 +696,17 @@ static Expr *parse_postfix(Parser *p) {
             Expr *fe = new_expr(EX_FIELD, f.line);
             fe->lhs = e; fe->sval = f.text;
             e = fe;
+        } else if (p_check(p, TK_LBRACKET)) {
+            int line = p->cur.line;
+            p_advance(p);
+            bool saved = p->no_struct_lit;
+            p->no_struct_lit = false;
+            Expr *ix = new_expr(EX_INDEX, line);
+            ix->lhs = e;
+            ix->rhs = parse_expr(p);
+            p->no_struct_lit = saved;
+            p_expect(p, TK_RBRACKET);
+            e = ix;
         } else if (p_check(p, TK_QUESTION)) {
             int line = p->cur.line;
             p_advance(p);
@@ -630,24 +762,6 @@ static Expr *parse_binop(Parser *p, int min_prec) {
 }
 static Expr *parse_expr(Parser *p) { return parse_binop(p, 1); }
 
-static bool starts_lvalue_assign(Parser *p) {
-    Lexer save_lx = p->lx;
-    Token save_cur = p->cur;
-    bool result = false;
-    if (p_check(p, TK_IDENT)) {
-        p_advance(p);
-        while (p_check(p, TK_DOT)) {
-            p_advance(p);
-            if (!p_check(p, TK_IDENT)) break;
-            p_advance(p);
-        }
-        result = p_check(p, TK_EQ);
-    }
-    p->lx = save_lx;
-    p->cur = save_cur;
-    return result;
-}
-
 static Stmt *parse_stmt(Parser *p) {
     int line = p->cur.line;
     if (p_match(p, TK_LET)) {
@@ -685,6 +799,17 @@ static Stmt *parse_stmt(Parser *p) {
         s->body = parse_block(p);
         return s;
     }
+    if (p_match(p, TK_FOR)) {
+        Stmt *s = new_stmt(ST_FOR, line);
+        s->name = p_expect(p, TK_IDENT).text;
+        if (!p_match(p, TK_IN)) fail(p->cur.line, "expected 'in' after the loop variable");
+        p->no_struct_lit = true;
+        s->expr = parse_expr(p);
+        if (p_match(p, TK_DOTDOT)) { s->is_range = true; s->expr2 = parse_expr(p); }
+        p->no_struct_lit = false;
+        s->body = parse_block(p);
+        return s;
+    }
     if (p_match(p, TK_RETURN)) {
         Stmt *s = new_stmt(ST_RETURN, line);
         if (!p_check(p, TK_RBRACE)) s->expr = parse_expr(p);
@@ -695,16 +820,17 @@ static Stmt *parse_stmt(Parser *p) {
         s->body = parse_block(p);
         return s;
     }
-    if (starts_lvalue_assign(p)) {
+    /* Anything else is an expression; a trailing '=' turns it into an assignment.
+       Validating that the left side is actually assignable happens in typecheck. */
+    Expr *e = parse_expr(p);
+    if (p_match(p, TK_EQ)) {
         Stmt *s = new_stmt(ST_ASSIGN, line);
-        VEC_PUSH_PTR(&s->assign_path, p_expect(p, TK_IDENT).text);
-        while (p_match(p, TK_DOT)) VEC_PUSH_PTR(&s->assign_path, p_expect(p, TK_IDENT).text);
-        p_expect(p, TK_EQ);
+        s->target = e;
         s->expr = parse_expr(p);
         return s;
     }
     Stmt *s = new_stmt(ST_EXPR, line);
-    s->expr = parse_expr(p);
+    s->expr = e;
     return s;
 }
 
@@ -736,6 +862,8 @@ static void bind_stmts_type_vars(Vec *body, const Vec *tp) {
         Stmt *s = VEC_PTR(body, i, Stmt);
         if (s->decl_type) s->decl_type = bind_type_vars(s->decl_type, tp);
         bind_expr_type_vars(s->expr, tp);
+        bind_expr_type_vars(s->expr2, tp);
+        bind_expr_type_vars(s->target, tp);
         for (int j = 0; j < s->cond_blocks.count; j++) {
             CondBlock *cb = vec_get(&s->cond_blocks, j);
             bind_expr_type_vars(cb->cond, tp);
@@ -808,6 +936,7 @@ static void parse_program(Parser *p) {
             p_expect(p, TK_LPAREN);
             while (!p_check(p, TK_RPAREN)) {
                 Field *pm = vec_push(&fd->params);
+                pm->is_mut = p_match(p, TK_MUT);
                 pm->name = p_expect(p, TK_IDENT).text;
                 p_expect(p, TK_COLON);
                 pm->type = parse_type(p);
@@ -884,6 +1013,10 @@ static Type *subst_type(Type *t, const Vec *subst) {
         }
         return t;
     }
+    if (t->kind == TY_ARRAY) {
+        Type *e = subst_type(ty_elem(t), subst);
+        return e == ty_elem(t) ? t : ty_array(e);
+    }
     if (t->kind != TY_NAMED || t->args.count == 0) return t;
     Type *r = ty_named(t->name);
     for (int i = 0; i < t->args.count; i++)
@@ -902,6 +1035,7 @@ static bool unify(Type *pat, Type *actual, Vec *subst) {
         return true;
     }
     if (pat->kind != actual->kind) return false;
+    if (pat->kind == TY_ARRAY) return unify(ty_elem(pat), ty_elem(actual), subst);
     if (pat->kind == TY_NAMED) {
         if (strcmp(pat->name, actual->name) != 0) return false;
         if (pat->args.count != actual->args.count) return false;
@@ -953,9 +1087,11 @@ static Stmt *clone_stmt(Stmt *s, const Vec *subst) {
     c->name = s->name;
     c->is_mut = s->is_mut;
     c->has_type = s->has_type;
+    c->is_range = s->is_range;
     c->decl_type = s->decl_type ? subst_type(s->decl_type, subst) : NULL;
     c->expr = clone_expr(s->expr, subst);
-    c->assign_path = s->assign_path;
+    c->expr2 = clone_expr(s->expr2, subst);
+    c->target = clone_expr(s->target, subst);
     for (int i = 0; i < s->cond_blocks.count; i++) {
         CondBlock *src = vec_get(&s->cond_blocks, i);
         CondBlock *dst = vec_push(&c->cond_blocks);
@@ -973,7 +1109,14 @@ static Stmt *clone_stmt(Stmt *s, const Vec *subst) {
 static Vec g_mono_structs;  /* Vec<StructDecl*> */
 static Vec g_mono_enums;    /* Vec<EnumDecl*>   */
 static Vec g_mono_fns;      /* Vec<FnDecl*>     */
+static Vec g_mono_arrays;   /* Vec<Type*> — one entry per distinct element type */
 static Vec g_fn_queue;      /* Vec<FnDecl*> — pending typecheck */
+
+static bool array_registered(const char *mangled) {
+    for (int i = 0; i < g_mono_arrays.count; i++)
+        if (strcmp(ty_mangle(VEC_PTR(&g_mono_arrays, i, Type)), mangled) == 0) return true;
+    return false;
+}
 
 static StructDecl *find_mono_struct(const char *mangled) {
     for (int i = 0; i < g_mono_structs.count; i++) {
@@ -1012,6 +1155,13 @@ static Vec make_subst(const Vec *type_params, const Vec *args, const char *what,
 
 /* Ensure the concrete type `t` (and everything it contains) has been instantiated. */
 static void request_type(Type *t, int line) {
+    if (t->kind == TY_ARRAY) {
+        request_type(ty_elem(t), line);
+        char *am = ty_mangle(t);
+        if (!array_registered(am)) VEC_PUSH_PTR(&g_mono_arrays, t);
+        free(am);
+        return;
+    }
     if (t->kind != TY_NAMED) return;
     for (int i = 0; i < t->args.count; i++) request_type(VEC_PTR(&t->args, i, Type), line);
 
@@ -1090,6 +1240,7 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
         Field *src = vec_get(&generic->params, i);
         Field *dst = vec_push(&fd->params);
         dst->name = src->name;
+        dst->is_mut = src->is_mut;
         dst->type = subst_type(src->type, &subst);
         request_type(dst->type, line);
     }
@@ -1284,10 +1435,40 @@ static char *labelf(const char *fmt, ...) {
     return strdup(buf);
 }
 
+/* Walk to the variable an lvalue is rooted at, so we can check it was declared `mut`. */
+static Var *lvalue_root(Expr *e, Scope *sc) {
+    while (e->kind == EX_FIELD || e->kind == EX_INDEX) e = e->lhs;
+    if (e->kind != EX_IDENT) return NULL;
+    return scope_lookup(sc, e->sval);
+}
+
 static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
     if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
         if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
         tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        return ty_void();
+    }
+    if (strcmp(e->sval, "len") == 0) {
+        if (e->args.count != 1) fail(e->line, "'len' takes exactly 1 argument");
+        Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        if (at->kind != TY_ARRAY && at->kind != TY_STRING)
+            fail(e->line, "'len' needs an array or string, got %s", ty_str(at));
+        return ty_int();
+    }
+    if (strcmp(e->sval, "push") == 0) {
+        if (e->args.count != 2) fail(e->line, "'push' takes exactly 2 arguments: the array and the value");
+        Expr *arr = VEC_PTR(&e->args, 0, Expr);
+        Type *at = tc_expr(arr, sc, NULL);
+        if (at->kind != TY_ARRAY) fail(e->line, "'push' needs an array, got %s", ty_str(at));
+        Var *root = lvalue_root(arr, sc);
+        if (!root)
+            fail(e->line, "'push' needs a variable to push into");
+        if (!root->is_mut)
+            fail(e->line, "cannot push to '%s' because it is immutable "
+                          "(declare it 'let mut' to allow this)", root->name);
+        Type *vt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_elem(at));
+        if (!ty_eq(vt, ty_elem(at)))
+            fail(e->line, "cannot push %s into %s", ty_str(vt), ty_str(at));
         return ty_void();
     }
     if (strcmp(e->sval, "to_string") == 0) {
@@ -1499,9 +1680,40 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
         case EX_CALL: t = tc_call(e, sc, expected); break;
         case EX_MATCH: t = tc_match(e, sc, expected); break;
         case EX_TRY: t = tc_try(e, sc); break;
+        case EX_ARRAY_LIT: {
+            Type *want = expected && expected->kind == TY_ARRAY ? ty_elem(expected) : NULL;
+            if (e->args.count == 0) {
+                if (!want)
+                    fail(e->line, "cannot tell what this empty array holds — "
+                                  "annotate it, as in 'let xs: [int] = []'");
+                t = ty_array(want);
+                break;
+            }
+            Type *elem = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, want);
+            if (elem->kind == TY_VOID) fail(e->line, "an array cannot hold void values");
+            for (int i = 1; i < e->args.count; i++) {
+                Expr *it = VEC_PTR(&e->args, i, Expr);
+                Type *at = tc_expr(it, sc, elem);
+                if (!ty_eq(at, elem))
+                    fail(it->line, "array element %d is %s but the first is %s — "
+                                   "every element must have the same type",
+                         i + 1, ty_str(at), ty_str(elem));
+            }
+            t = ty_array(elem);
+            break;
+        }
+        case EX_INDEX: {
+            Type *base = tc_expr(e->lhs, sc, NULL);
+            if (base->kind != TY_ARRAY)
+                fail(e->line, "cannot index %s — only arrays support '[...]'", ty_str(base));
+            Type *ix = tc_expr(e->rhs, sc, ty_int());
+            if (ix->kind != TY_INT) fail(e->rhs->line, "an array index must be int, got %s", ty_str(ix));
+            t = ty_elem(base);
+            break;
+        }
         default: t = ty_unknown(); break;
     }
-    if (t->kind == TY_NAMED) request_type(t, e->line);
+    if (t->kind == TY_NAMED || t->kind == TY_ARRAY) request_type(t, e->line);
     e->type = t;
     return t;
 }
@@ -1521,25 +1733,18 @@ static void tc_stmt(Stmt *s, Scope *sc) {
             break;
         }
         case ST_ASSIGN: {
-            char *root = VEC_PTR(&s->assign_path, 0, char);
-            Var *v = scope_lookup(sc, root);
-            if (!v) fail(s->line, "undefined variable '%s'", root);
-            if (!v->is_mut)
-                fail(s->line, "cannot assign to immutable '%s' (declare it 'let mut' to allow this)", root);
-            Type *cur = v->type;
-            for (int i = 1; i < s->assign_path.count; i++) {
-                char *field = VEC_PTR(&s->assign_path, i, char);
-                if (cur->kind != TY_NAMED) fail(s->line, "'.%s' used on %s, which is not a struct", field, ty_str(cur));
-                StructDecl *sd = find_mono_struct(ty_mangle(cur));
-                if (!sd) fail(s->line, "'.%s' used on %s, which is not a struct", field, ty_str(cur));
-                Field *found = NULL;
-                for (int j = 0; j < sd->fields.count; j++) {
-                    Field *f = vec_get(&sd->fields, j);
-                    if (strcmp(f->name, field) == 0) { found = f; break; }
-                }
-                if (!found) fail(s->line, "%s has no field '%s'", ty_str(cur), field);
-                cur = found->type;
+            Expr *tgt = s->target;
+            if (tgt->kind != EX_IDENT && tgt->kind != EX_FIELD && tgt->kind != EX_INDEX)
+                fail(s->line, "this is not something you can assign to");
+            Var *root = lvalue_root(tgt, sc);
+            if (!root) {
+                if (tgt->kind == EX_IDENT) fail(s->line, "undefined variable '%s'", tgt->sval);
+                fail(s->line, "this is not something you can assign to");
             }
+            if (!root->is_mut)
+                fail(s->line, "cannot assign to '%s' because it is immutable "
+                              "(declare it 'let mut' to allow this)", root->name);
+            Type *cur = tc_expr(tgt, sc, NULL);
             Type *rt = tc_expr(s->expr, sc, cur);
             if (!ty_eq(cur, rt)) fail(s->line, "cannot assign %s to a target of type %s", ty_str(rt), ty_str(cur));
             break;
@@ -1558,6 +1763,27 @@ static void tc_stmt(Stmt *s, Scope *sc) {
             Type *ct = tc_expr(s->expr, sc, NULL);
             if (ct->kind != TY_BOOL) fail(s->expr->line, "while condition must be bool, got %s", ty_str(ct));
             tc_block(&s->body, sc);
+            break;
+        }
+        case ST_FOR: {
+            Type *bound;
+            if (s->is_range) {
+                Type *lo = tc_expr(s->expr, sc, ty_int());
+                Type *hi = tc_expr(s->expr2, sc, ty_int());
+                if (lo->kind != TY_INT || hi->kind != TY_INT)
+                    fail(s->line, "a '..' range needs int bounds, got %s..%s", ty_str(lo), ty_str(hi));
+                bound = ty_int();
+            } else {
+                Type *it = tc_expr(s->expr, sc, NULL);
+                if (it->kind != TY_ARRAY)
+                    fail(s->expr->line, "'for ... in' needs an array or an 'a..b' range, got %s", ty_str(it));
+                bound = ty_elem(it);
+            }
+            /* The loop variable is rebound each iteration, so it is never `mut`. */
+            scope_push(sc);
+            scope_declare(sc, s->name, bound, false);
+            tc_block(&s->body, sc);
+            scope_pop(sc);
             break;
         }
         case ST_RETURN:
@@ -1585,7 +1811,7 @@ static void tc_fn(FnDecl *fd) {
     Scope sc; scope_init(&sc); scope_push(&sc);
     for (int i = 0; i < fd->params.count; i++) {
         Field *pm = vec_get(&fd->params, i);
-        scope_declare(&sc, pm->name, pm->type, false);
+        scope_declare(&sc, pm->name, pm->type, pm->is_mut);
     }
     g_cur_ret = fd->ret_type;
     tc_block(&fd->body, &sc);
@@ -1625,7 +1851,7 @@ static const char *c_type(const Type *t) {
         case TY_FLOAT: return "double";
         case TY_BOOL: return "bool";
         case TY_STRING: return "char*";
-        case TY_NAMED: return ty_mangle(t);
+        case TY_NAMED: case TY_ARRAY: return ty_mangle(t);
         default: return "void*";
     }
 }
@@ -1812,6 +2038,28 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             sb_append(out, tmp);
             break;
         }
+        case EX_ARRAY_LIT: {
+            char *m = ty_mangle(e->type);
+            char *tmp = fresh_tmp();
+            indent_to(pre, ind);
+            sb_appendf(pre, "%s %s = %s_new(%d);\n", m, tmp, m, e->args.count);
+            for (int i = 0; i < e->args.count; i++) {
+                SB val; sb_init(&val);
+                cg_expr(VEC_PTR(&e->args, i, Expr), &val, pre, ind);
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s->data[%d] = %s;\n", tmp, i, val.data);
+            }
+            sb_append(out, tmp);
+            break;
+        }
+        case EX_INDEX: {
+            sb_appendf(out, "(*%s_at(", ty_mangle(e->lhs->type));
+            cg_expr(e->lhs, out, pre, ind);
+            sb_append(out, ", ");
+            cg_expr(e->rhs, out, pre, ind);
+            sb_append(out, "))");
+            break;
+        }
         case EX_TRY: cg_try(e, out, pre, ind); break;
         case EX_CALL: {
             if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
@@ -1829,6 +2077,28 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                     cg_expr(arg, out, pre, ind);
                     sb_append(out, ") ? \"true\" : \"false\"");
                 } else cg_expr(arg, out, pre, ind);
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "len") == 0) {
+                Expr *arg = VEC_PTR(&e->args, 0, Expr);
+                if (arg->type->kind == TY_STRING) {
+                    sb_append(out, "(int64_t)strlen(");
+                    cg_expr(arg, out, pre, ind);
+                    sb_append(out, ")");
+                } else {
+                    sb_append(out, "(");
+                    cg_expr(arg, out, pre, ind);
+                    sb_append(out, ")->len");
+                }
+                break;
+            }
+            if (strcmp(e->sval, "push") == 0) {
+                Expr *arr = VEC_PTR(&e->args, 0, Expr);
+                sb_appendf(out, "%s_push(", ty_mangle(arr->type));
+                cg_expr(arr, out, pre, ind);
+                sb_append(out, ", ");
+                cg_expr(VEC_PTR(&e->args, 1, Expr), out, pre, ind);
                 sb_append(out, ")");
                 break;
             }
@@ -1870,13 +2140,12 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             sb_appendf(sb, "%s %s = %s;\n", c_type(s->decl_type), s->name, line.data);
             break;
         case ST_ASSIGN: {
+            SB tgt; sb_init(&tgt);
+            cg_expr(s->target, &tgt, &pre, ind);
             cg_expr(s->expr, &line, &pre, ind);
             flush(sb, &pre);
             indent_to(sb, ind);
-            sb_append(sb, VEC_PTR(&s->assign_path, 0, char));
-            for (int i = 1; i < s->assign_path.count; i++)
-                sb_appendf(sb, ".%s", VEC_PTR(&s->assign_path, i, char));
-            sb_appendf(sb, " = %s;\n", line.data);
+            sb_appendf(sb, "%s = %s;\n", tgt.data, line.data);
             break;
         }
         case ST_IF: {
@@ -1930,6 +2199,40 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             }
             break;
         }
+        case ST_FOR: {
+            /* Bounds and the array are evaluated once, before the loop. */
+            char *idx = fresh_tmp();
+            if (s->is_range) {
+                SB lo; sb_init(&lo);
+                SB hi; sb_init(&hi);
+                cg_expr(s->expr, &lo, &pre, ind);
+                cg_expr(s->expr2, &hi, &pre, ind);
+                char *end = fresh_tmp();
+                flush(sb, &pre);
+                indent_to(sb, ind);
+                sb_appendf(sb, "int64_t %s = %s;\n", end, hi.data);
+                indent_to(sb, ind);
+                sb_appendf(sb, "for (int64_t %s = %s; %s < %s; %s++) {\n", idx, lo.data, idx, end, idx);
+                indent_to(sb, ind + 1);
+                sb_appendf(sb, "int64_t %s = %s; (void)%s;\n", s->name, idx, s->name);
+            } else {
+                SB arr; sb_init(&arr);
+                cg_expr(s->expr, &arr, &pre, ind);
+                char *av = fresh_tmp();
+                flush(sb, &pre);
+                indent_to(sb, ind);
+                sb_appendf(sb, "%s %s = %s;\n", c_type(s->expr->type), av, arr.data);
+                indent_to(sb, ind);
+                sb_appendf(sb, "for (int64_t %s = 0; %s < %s->len; %s++) {\n", idx, idx, av, idx);
+                indent_to(sb, ind + 1);
+                sb_appendf(sb, "%s %s = %s->data[%s]; (void)%s;\n",
+                           c_type(ty_elem(s->expr->type)), s->name, av, idx, s->name);
+            }
+            cg_stmts(&s->body, sb, ind + 1);
+            indent_to(sb, ind);
+            sb_append(sb, "}\n");
+            break;
+        }
         case ST_RETURN:
             if (s->expr) {
                 cg_expr(s->expr, &line, &pre, ind);
@@ -1979,11 +2282,37 @@ static const char *RUNTIME =
     "bool klang_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0; }\n"
     "char *klang_int_to_string(int64_t v) { char *r = malloc(24); snprintf(r, 24, \"%\" PRId64 \"\", v); return r; }\n"
     "char *klang_float_to_string(double v) { char *r = malloc(32); snprintf(r, 32, \"%g\", v); return r; }\n"
-    "char *klang_bool_to_string(bool v) { return klang_strdup(v ? \"true\" : \"false\"); }\n";
+    "char *klang_bool_to_string(bool v) { return klang_strdup(v ? \"true\" : \"false\"); }\n"
+    "void klang_bounds(int64_t i, int64_t len) {\n"
+    "    fprintf(stderr, \"klang: index %\" PRId64 \" is out of bounds for an array of length %\" PRId64 \"\\n\", i, len);\n"
+    "    exit(1);\n"
+    "}\n";
+
+/* Arrays are heap objects behind a pointer, so pushing through one binding is
+   visible through every other binding — no surprise copies. */
+static void emit_array(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    const char *e = c_type(ty_elem(t));
+    sb_appendf(sb, "typedef struct %s_s { int64_t len; int64_t cap; %s *data; } *%s;\n", m, e, m);
+    sb_appendf(sb, "%s %s_new(int64_t n) {\n"
+                   "    %s a = malloc(sizeof(struct %s_s));\n"
+                   "    a->len = n; a->cap = n < 4 ? 4 : n;\n"
+                   "    a->data = malloc(sizeof(%s) * (size_t)a->cap);\n"
+                   "    return a;\n}\n", m, m, m, m, e);
+    sb_appendf(sb, "%s *%s_at(%s a, int64_t i) {\n"
+                   "    if (i < 0 || i >= a->len) klang_bounds(i, a->len);\n"
+                   "    return &a->data[i];\n}\n", e, m, m);
+    sb_appendf(sb, "void %s_push(%s a, %s v) {\n"
+                   "    if (a->len == a->cap) {\n"
+                   "        a->cap *= 2;\n"
+                   "        a->data = realloc(a->data, sizeof(%s) * (size_t)a->cap);\n"
+                   "    }\n"
+                   "    a->data[a->len++] = v;\n}\n\n", m, m, e, e);
+}
 
 /* Collect the mangled names of named types a mono type embeds by value. */
 static void collect_deps(const Type *t, Vec *out) {
-    if (t->kind != TY_NAMED) return;
+    if (t->kind != TY_NAMED && t->kind != TY_ARRAY) return;
     VEC_PUSH_PTR(out, ty_mangle(t));
 }
 
@@ -2025,7 +2354,8 @@ static void emit_enum(EnumDecl *ed, SB *sb) {
 
 /* Types embed each other by value, so emit them in dependency order. */
 static void emit_types(SB *sb) {
-    int total = g_mono_structs.count + g_mono_enums.count;
+    int n_s = g_mono_structs.count, n_e = g_mono_enums.count, n_a = g_mono_arrays.count;
+    int total = n_s + n_e + n_a;
     bool *done = calloc((size_t)total, sizeof(bool));
     Vec emitted; vec_init(&emitted, sizeof(char *));
 
@@ -2033,21 +2363,24 @@ static void emit_types(SB *sb) {
         bool progress = false;
         for (int i = 0; i < total; i++) {
             if (done[i]) continue;
-            bool is_struct = i < g_mono_structs.count;
-            StructDecl *sd = is_struct ? VEC_PTR(&g_mono_structs, i, StructDecl) : NULL;
-            EnumDecl *ed = is_struct ? NULL : VEC_PTR(&g_mono_enums, i - g_mono_structs.count, EnumDecl);
-            const char *mangled = is_struct ? sd->mangled : ed->mangled;
+            StructDecl *sd = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl) : NULL;
+            EnumDecl *ed = (!sd && i < n_s + n_e) ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl) : NULL;
+            Type *at = (!sd && !ed) ? VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type) : NULL;
+            const char *mangled = sd ? sd->mangled : ed ? ed->mangled : ty_mangle(at);
 
             Vec deps; vec_init(&deps, sizeof(char *));
-            if (is_struct) {
+            if (sd) {
                 for (int j = 0; j < sd->fields.count; j++)
                     collect_deps(((Field *)vec_get(&sd->fields, j))->type, &deps);
-            } else {
+            } else if (ed) {
                 for (int j = 0; j < ed->variants.count; j++) {
                     Variant *v = vec_get(&ed->variants, j);
                     for (int k = 0; k < v->payload.count; k++)
                         collect_deps(VEC_PTR(&v->payload, k, Type), &deps);
                 }
+            } else {
+                /* An array stores its elements inline, so the element type must be complete. */
+                collect_deps(ty_elem(at), &deps);
             }
             bool ready = true;
             for (int j = 0; j < deps.count && ready; j++) {
@@ -2063,7 +2396,9 @@ static void emit_types(SB *sb) {
             }
             if (!ready) continue;
 
-            if (is_struct) emit_struct(sd, sb); else emit_enum(ed, sb);
+            if (sd) emit_struct(sd, sb);
+            else if (ed) emit_enum(ed, sb);
+            else emit_array(at, sb);
             VEC_PUSH_PTR(&emitted, (char *)mangled);
             done[i] = true;
             progress = true;
@@ -2072,9 +2407,9 @@ static void emit_types(SB *sb) {
     }
     for (int i = 0; i < total; i++) {
         if (done[i]) continue;
-        bool is_struct = i < g_mono_structs.count;
-        const char *m = is_struct ? VEC_PTR(&g_mono_structs, i, StructDecl)->mangled
-                                  : VEC_PTR(&g_mono_enums, i - g_mono_structs.count, EnumDecl)->mangled;
+        const char *m = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl)->mangled
+                      : i < n_s + n_e ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl)->mangled
+                      : ty_mangle(VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type));
         fail(0, "type '%s' is part of a cycle — recursive types need indirection, "
                 "which Klang does not have yet", m);
     }
@@ -2082,7 +2417,7 @@ static void emit_types(SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.2 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.3 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n\n");
     sb_append(sb, RUNTIME);
@@ -2143,7 +2478,7 @@ static char *read_file(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.2)\n\n"
+        printf("klangc — Klang compiler (0.3)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -2151,7 +2486,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.2.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.3.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -2161,6 +2496,7 @@ int main(int argc, char **argv) {
     vec_init(&g_mono_structs, sizeof(StructDecl *));
     vec_init(&g_mono_enums, sizeof(EnumDecl *));
     vec_init(&g_mono_fns, sizeof(FnDecl *));
+    vec_init(&g_mono_arrays, sizeof(Type *));
     vec_init(&g_fn_queue, sizeof(FnDecl *));
 
     Parser pre;

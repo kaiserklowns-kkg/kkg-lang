@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.2 — Phase 1 complete
+## Status: v0.3 — Phase 2 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -25,18 +25,32 @@ aspirational.
 - **`?` operator** to propagate errors in one character.
 - **Real generics** for functions, structs, and enums, via monomorphization —
   no boxing, no runtime cost.
+- **Arrays `[T]`** — literals, indexing, nesting, generics over them, and bounds
+  checks that report the index and the length instead of reading garbage.
+- **`for x in xs` and `for i in a..b`**, plus `len` and `push`.
+- **String interpolation** — `"${name} v${version}"`, no `to_string` needed.
+- **`mut` parameters**, so a function can say it modifies what it was handed.
 
-Not yet: arrays/maps, closures, traits, modules, concurrency, and all tooling
+Not yet: maps, closures, traits, modules, concurrency, and all tooling
 (REPL, formatter, linter, package manager). See the
 [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
 
 ```kkg
-// Errors are values. `?` propagates them.
+// Errors are values. `?` propagates them. `${}` interpolates anything.
 fn describe_port(text: string) -> Result<string, string> {
     let port = parse_port(text)?
-    return Ok("port is " + to_string(port))
+    return Ok("port is ${port}")
+}
+
+// Arrays, ranges, and for-in. Bounds are checked.
+fn evens(upto: int) -> [int] {
+    let mut out: [int] = []
+    for n in 0..upto {
+        if n % 2 == 0 { push(out, n) }
+    }
+    return out
 }
 
 // No null. The compiler makes you handle the empty case.
@@ -48,7 +62,7 @@ fn safe_div(a: int, b: int) -> Option<int> {
 }
 
 match safe_div(10, 2) {
-    Some(v) => println("10/2 = " + to_string(v)),
+    Some(v) => println("10/2 = ${v}"),
     None    => println("cannot divide"),
 }
 
@@ -64,7 +78,8 @@ first_or(Some(7), 0)          // 7        — T = int
 first_or(None, "default")     // default  — T = string, from the 2nd argument
 ```
 
-See [examples/phase1.kkg](examples/phase1.kkg) for the full tour.
+See [examples/phase1.kkg](examples/phase1.kkg) and
+[examples/phase2.kkg](examples/phase2.kkg) for the full tour.
 
 ## Build
 
@@ -78,7 +93,7 @@ make check      # runs the examples and the compile-error tests
 ## Try it
 
 ```sh
-bin/klangc examples/phase1.kkg -o out.c
+bin/klangc examples/phase2.kkg -o out.c
 gcc -O2 -o out out.c
 ./out
 ```
