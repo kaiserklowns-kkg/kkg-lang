@@ -1,0 +1,7 @@
+enum Color { Red, Green }
+fn main() {
+    match Red {
+        Red    => println("r"),
+        Purple => println("?"),
+    }
+}

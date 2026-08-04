@@ -1,0 +1,47 @@
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn dist_sq(p: Point) -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+fn classify(n: int) -> string {
+    if n > 0 {
+        return "positive"
+    } else if n < 0 {
+        return "negative"
+    } else {
+        return "zero"
+    }
+}
+
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    while i < 5 {
+        total = add(total, i)
+        i = i + 1
+    }
+    println("sum 0..4 = " + to_string(total))
+
+    let p = Point { x: 3, y: 4 }
+    println("dist_sq = " + to_string(dist_sq(p)))
+
+    println(classify(total))
+    println(classify(-5))
+    println(classify(0))
+
+    let name = "Klang"
+    let mut greeting = "Hello, "
+    greeting = greeting + name
+    println(greeting)
+
+    let ok = true && !false
+    println(to_string(ok))
+}

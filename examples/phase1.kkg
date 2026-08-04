@@ -1,0 +1,101 @@
+// Phase 1 tour: enums, match, Option, Result, `?`, and generics.
+
+enum Shape {
+    Circle(float),
+    Rect(float, float),
+    Empty,
+}
+
+fn area(s: Shape) -> float {
+    return match s {
+        Circle(r)  => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Empty      => 0.0,
+    }
+}
+
+// Option: no null anywhere.
+fn safe_div(a: int, b: int) -> Option<int> {
+    if b == 0 {
+        return None
+    }
+    return Some(a / b)
+}
+
+// Result: errors are values, and `?` propagates them.
+fn parse_port(text: string) -> Result<int, string> {
+    if text == "80" {
+        return Ok(80)
+    }
+    if text == "443" {
+        return Ok(443)
+    }
+    return Err("not a port I know: " + text)
+}
+
+fn describe_port(text: string) -> Result<string, string> {
+    let port = parse_port(text)?
+    return Ok("port is " + to_string(port))
+}
+
+// Generics get monomorphized — one real function per concrete type.
+fn first_or<T>(value: Option<T>, fallback: T) -> T {
+    return match value {
+        Some(v) => v,
+        None    => fallback,
+    }
+}
+
+struct Pair<A, B> {
+    left: A,
+    right: B,
+}
+
+fn main() {
+    println(to_string(area(Circle(2.0))))
+    println(to_string(area(Rect(3.0, 4.0))))
+    println(to_string(area(Empty)))
+
+    match safe_div(10, 2) {
+        Some(v) => println("10/2 = " + to_string(v)),
+        None    => println("cannot divide"),
+    }
+    match safe_div(1, 0) {
+        Some(v) => println("1/0 = " + to_string(v)),
+        None    => println("cannot divide by zero"),
+    }
+
+    match describe_port("443") {
+        Ok(msg)  => println(msg),
+        Err(why) => println("error: " + why),
+    }
+    match describe_port("9999") {
+        Ok(msg)  => println(msg),
+        Err(why) => println("error: " + why),
+    }
+
+    // Same generic function, two different instantiations.
+    println(to_string(first_or(Some(7), 0)))
+    println(first_or(None, "default"))
+
+    let p = Pair { left: 1, right: "one" }
+    println(to_string(p.left) + " -> " + p.right)
+
+    // match as a statement, with block arms.
+    let mut label = ""
+    match safe_div(9, 3) {
+        Some(v) => {
+            label = "got " + to_string(v)
+        }
+        None => {
+            label = "nothing"
+        }
+    }
+    println(label)
+
+    // `_` catch-all covers every variant you don't care about.
+    println(match Rect(1.0, 2.0) {
+        Circle(r) => "a circle",
+        _         => "something else",
+    })
+}

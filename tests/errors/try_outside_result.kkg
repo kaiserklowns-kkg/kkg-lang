@@ -1,0 +1,5 @@
+fn get() -> Result<int, string> { return Ok(1) }
+fn main() {
+    let x = get()?
+    println(to_string(x))
+}

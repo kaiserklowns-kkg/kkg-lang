@@ -1,0 +1,8 @@
+enum Color { Red, Green, Blue }
+fn name(c: Color) -> string {
+    return match c {
+        Red   => "red",
+        Green => "green",
+    }
+}
+fn main() { println(name(Red)) }
