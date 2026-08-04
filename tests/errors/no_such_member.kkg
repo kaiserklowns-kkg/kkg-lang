@@ -1,0 +1,4 @@
+import "std/math"
+fn main() {
+    println("${math.cube(3)}")
+}

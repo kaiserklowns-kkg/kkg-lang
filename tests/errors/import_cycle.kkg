@@ -1,0 +1,2 @@
+import "cyc/a"
+fn main() { println("${a.ping()}") }

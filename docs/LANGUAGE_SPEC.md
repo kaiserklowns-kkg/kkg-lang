@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.4)
+# Klang Language Spec (v0.5)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -181,6 +181,51 @@ let s = first_or(None, "default")       // T = string, inferred from the 2nd arg
 let p = Pair { left: 1, right: "one" }  // Pair<int, string>
 ```
 
+## Modules
+
+A file is a module. `import` names one by path, and the last segment of that path
+becomes the name you call through:
+
+```kkg
+import "std/math"
+import "std/list"
+import "std/math" as arithmetic   // same module, second name
+
+fn main() {
+    println("${math.abs(0 - 7)}")
+    println("${list.sum([1, 2, 3])}")
+}
+```
+
+**Nothing is exported unless it says so.** `pub` marks a declaration usable from
+another module; everything else is private to its own file. Private by default is
+the safe direction: widening a module's surface later is harmless, narrowing it
+breaks callers.
+
+```kkg
+pub fn abs(n: int) -> int { ... }   // callable as math.abs
+fn isEven(n: int) -> bool { ... }   // std/math only; a compile error elsewhere
+```
+
+Rules that keep this predictable:
+
+- **Import paths resolve from the project root**, not from the importing file, so a
+  path always names the same module. Two files reaching `std/math` get *one* module,
+  not two copies with duplicate declarations.
+- Lookup order is: project root (the directory of the file you compiled), then each
+  directory in `KLANG_PATH`, then next to the compiler — which is how the standard
+  library is found without anyone configuring anything.
+- **Imports come first**, before any declaration.
+- A module is loaded once however many times it is imported, and an **import cycle is
+  reported** rather than followed.
+- Qualified names are the only way to reach another module, so an unqualified name can
+  only ever mean something from your own file or the prelude. That is also what makes
+  visibility checkable in one pass.
+
+`Option`, `Result`, and generics all cross module boundaries unchanged — a
+`pub fn first<T>(xs: [T]) -> Option<T>` in one module is instantiated per call site
+in another, with no boxing.
+
 ## The collector
 
 Klang ships its own garbage collector — not a dependency — because the runtime is
@@ -241,7 +286,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.4, Phase 3 complete)
+## Implemented today (v0.5, Phase 4 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -274,6 +319,14 @@ let received = ch.receive()
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 4 additions**
+- **Modules**: one file per module, `import "path"`, `as` for a second name
+- **`pub`** — private by default; only marked declarations cross a module boundary
+- Import paths resolve from the project root, so a path always names one module
+- Standard library found next to the compiler, or via `KLANG_PATH`
+- Import cycles and unknown members reported with the file and line that caused them
+- A first standard library: `std/math` and `std/list`
+
 **Phase 3 additions**
 - **Klang's own garbage collector** — conservative mark-sweep over the machine stack
   and registers, with an adaptive collection threshold. Memory is now bounded: the
@@ -285,7 +338,7 @@ Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
-- Maps, closures, traits, modules/imports
+- Maps, closures, traits
 - Integer overflow still wraps silently rather than trapping
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)

@@ -1,0 +1,80 @@
+// std/list — generic array helpers.
+//
+// Shows that generics, Option and Result all cross module boundaries intact.
+
+import "std/math"
+
+pub fn sum(xs: [int]) -> int {
+    let mut total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+pub fn largest(xs: [int]) -> Option<int> {
+    if len(xs) == 0 {
+        return None
+    }
+    let mut best = xs[0]
+    for x in xs {
+        best = math.max(best, x)
+    }
+    return Some(best)
+}
+
+pub fn smallest(xs: [int]) -> Option<int> {
+    if len(xs) == 0 {
+        return None
+    }
+    let mut best = xs[0]
+    for x in xs {
+        best = math.min(best, x)
+    }
+    return Some(best)
+}
+
+// Generic across module boundaries: T is chosen at each call site.
+pub fn first<T>(xs: [T]) -> Option<T> {
+    if len(xs) == 0 {
+        return None
+    }
+    return Some(xs[0])
+}
+
+pub fn last<T>(xs: [T]) -> Option<T> {
+    if len(xs) == 0 {
+        return None
+    }
+    return Some(xs[len(xs) - 1])
+}
+
+pub fn reversed<T>(xs: [T]) -> [T] {
+    let mut out: [T] = []
+    let n = len(xs)
+    for i in 0..n {
+        push(out, xs[n - 1 - i])
+    }
+    return out
+}
+
+pub fn at<T>(xs: [T], i: int) -> Result<T, string> {
+    if i < 0 {
+        return Err("index ${i} is negative")
+    }
+    if i >= len(xs) {
+        return Err("index ${i} is past the end (length ${len(xs)})")
+    }
+    return Ok(xs[i])
+}
+
+pub fn join(parts: [string], sep: string) -> string {
+    let mut out = ""
+    for i in 0..len(parts) {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + parts[i]
+    }
+    return out
+}

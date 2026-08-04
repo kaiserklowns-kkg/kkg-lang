@@ -1,0 +1,79 @@
+// Phase 4: modules.
+//
+// `import` names a module by path; the last segment becomes the name you call
+// through. Both modules below are also imported by each other's dependency
+// chain (std/list imports std/math), which is loaded once, not twice.
+
+import "std/math"
+import "std/list"
+import "std/math" as arithmetic   // the same module under a second name
+
+pub struct Reading {
+    label: string,
+    value: int,
+}
+
+fn describe(r: Reading) -> string {
+    return "${r.label}=${r.value}"
+}
+
+fn main() {
+    // Calling into another module.
+    println("abs(-7)        = ${math.abs(0 - 7)}")
+    println("clamp(42,0,10) = ${math.clamp(42, 0, 10)}")
+    println("gcd(48, 18)    = ${math.gcd(48, 18)}")
+    println("pow(2, 10)     = ${math.pow(2, 10)}")
+    println("sumEvens(10)   = ${math.sumEvens(10)}")
+
+    // An alias is just another name for the same module.
+    assert(arithmetic.abs(0 - 7) == math.abs(0 - 7), "aliased module must be the same module")
+
+    let nums = [5, 3, 9, 1, 7]
+    println("sum            = ${list.sum(nums)}")
+
+    // Option crosses the module boundary and still forces you to handle None.
+    match list.largest(nums) {
+        Some(v) => println("largest        = ${v}"),
+        None    => println("largest        = (empty)"),
+    }
+    let empty: [int] = []
+    match list.smallest(empty) {
+        Some(v) => println("smallest       = ${v}"),
+        None    => println("smallest       = (empty list, as expected)"),
+    }
+
+    // Generics instantiate per call site, across modules.
+    match list.first(nums) {
+        Some(v) => println("first          = ${v}"),
+        None    => println("first          = (none)"),
+    }
+    let words = ["alpha", "beta", "gamma"]
+    match list.last(words) {
+        Some(w) => println("last word      = ${w}"),
+        None    => println("last word      = (none)"),
+    }
+    println("reversed       = ${list.join(list.reversed(words), ", ")}")
+
+    // Result crosses too, and `?`-style handling still works with match.
+    match list.at(nums, 99) {
+        Ok(v)  => println("at(99)         = ${v}"),
+        Err(e) => println("at(99)         = error: ${e}"),
+    }
+    match list.at(nums, 2) {
+        Ok(v)  => println("at(2)          = ${v}"),
+        Err(e) => println("at(2)          = error: ${e}"),
+    }
+
+    // Types declared here still resolve unqualified.
+    let r = Reading { label: "temp", value: 21 }
+    println("local struct   = ${describe(r)}")
+
+    // Generic helpers reused at a third type.
+    let readings = [Reading { label: "a", value: 1 }, Reading { label: "b", value: 2 }]
+    match list.last(readings) {
+        Some(x) => println("last reading   = ${describe(x)}"),
+        None    => println("last reading   = (none)"),
+    }
+
+    println("modules: ok")
+}

@@ -1,0 +1,2 @@
+import "cyc/b"
+pub fn ping() -> int { return b.pong() }

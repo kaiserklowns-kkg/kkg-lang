@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.4 — Phase 3 complete
+## Status: v0.5 — Phase 4 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -35,8 +35,12 @@ aspirational.
   **126 MB** while leaking now peaks at **18 MB**. See
   [The collector](docs/LANGUAGE_SPEC.md#the-collector) for the design and its tradeoffs.
 - **`assert(cond, msg)`**, plus `gc_collect()` and `gc_heap()` to inspect the heap.
+- **Modules** — `import "std/math"`, with `pub` marking what crosses the boundary and
+  everything else private by default. Import paths resolve from the project root, so a
+  path always names one module; cycles are reported, not followed.
+- **A standard library has started**: [std/math](std/math.kkg) and [std/list](std/list.kkg).
 
-Not yet: maps, closures, traits, modules, concurrency, and all tooling
+Not yet: maps, closures, traits, concurrency, and all tooling
 (REPL, formatter, linter, package manager). Integer overflow still wraps silently.
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
@@ -83,8 +87,22 @@ first_or(Some(7), 0)          // 7        — T = int
 first_or(None, "default")     // default  — T = string, from the 2nd argument
 ```
 
-See [examples/phase1.kkg](examples/phase1.kkg) and
-[examples/phase2.kkg](examples/phase2.kkg) for the full tour.
+```kkg
+// Modules: private by default, `pub` to export.
+import "std/list"
+
+fn main() {
+    match list.largest([5, 3, 9]) {
+        Some(v) => println("largest = ${v}"),
+        None    => println("empty"),
+    }
+}
+```
+
+See [examples/phase1.kkg](examples/phase1.kkg),
+[examples/phase2.kkg](examples/phase2.kkg),
+[examples/modules.kkg](examples/modules.kkg), and
+[examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build
 

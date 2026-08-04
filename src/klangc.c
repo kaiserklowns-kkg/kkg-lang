@@ -83,7 +83,7 @@ static void fail(int line, const char *fmt, ...) {
 typedef enum {
     TK_EOF, TK_IDENT, TK_INT, TK_FLOAT, TK_STRING,
     TK_TRUE, TK_FALSE, TK_LET, TK_MUT, TK_FN, TK_STRUCT, TK_ENUM, TK_MATCH,
-    TK_IF, TK_ELSE, TK_WHILE, TK_FOR, TK_IN, TK_RETURN,
+    TK_IF, TK_ELSE, TK_WHILE, TK_FOR, TK_IN, TK_RETURN, TK_PUB, TK_IMPORT, TK_AS,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE, TK_LBRACKET, TK_RBRACKET,
     TK_COMMA, TK_COLON, TK_ARROW, TK_FATARROW, TK_DOT, TK_DOTDOT, TK_QUESTION,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE,
@@ -145,6 +145,7 @@ static Token lex_next(Lexer *lx) {
             {"fn", TK_FN}, {"struct", TK_STRUCT}, {"enum", TK_ENUM}, {"match", TK_MATCH},
             {"if", TK_IF}, {"else", TK_ELSE}, {"while", TK_WHILE}, {"return", TK_RETURN},
             {"for", TK_FOR}, {"in", TK_IN},
+            {"pub", TK_PUB}, {"import", TK_IMPORT}, {"as", TK_AS},
         };
         for (size_t i = 0; i < sizeof kws / sizeof kws[0]; i++) {
             if (strcmp(text, kws[i].kw) == 0) { free(text); return make_tok(kws[i].k, line); }
@@ -277,6 +278,49 @@ static Token lex_next(Lexer *lx) {
     }
 }
 
+/* ── modules ──────────────────────────────────────────────────────────────
+ * A module path is what an import names: "std/math". Two paths are reserved:
+ *   ""   the prelude — Option, Result — visible from everywhere
+ *   "@"  the file passed on the command line
+ * A declaration's key is "<path>:<name>", so "std/math:abs" and "@:main".
+ */
+#define MOD_PRELUDE ""
+#define MOD_ROOT    "@"
+#define PRELUDE_OPTION MOD_PRELUDE ":Option"
+#define PRELUDE_RESULT MOD_PRELUDE ":Result"
+
+static char *qual_key(const char *module, const char *name) {
+    size_t n = strlen(module) + strlen(name) + 2;
+    char *k = malloc(n);
+    snprintf(k, n, "%s:%s", module, name);
+    return k;
+}
+/* The bare name, for messages: "std/math:abs" -> "abs" */
+static const char *key_name(const char *key) {
+    const char *c = strrchr(key, ':');
+    return c ? c + 1 : key;
+}
+/* How a key should read in a diagnostic: "std/math:abs" -> "math.abs",
+   and anything from the prelude or the root file as just its bare name. */
+static const char *key_show(const char *key) {
+    static char bufs[8][160];
+    static int slot = 0;
+    const char *colon = strrchr(key, ':');
+    if (!colon) return key;
+    size_t modlen = (size_t)(colon - key);
+    if (modlen == 0 || (modlen == 1 && key[0] == '@')) return colon + 1;
+    const char *seg = colon;
+    while (seg > key && seg[-1] != '/') seg--;
+    char *buf = bufs[slot = (slot + 1) % 8];
+    snprintf(buf, sizeof bufs[0], "%.*s.%s", (int)(colon - seg), seg, colon + 1);
+    return buf;
+}
+/* Keys carry '/' and ':', which C identifiers cannot. */
+static char *key_mangle(const char *key) {
+    char *r = strdup(key);
+    for (char *p = r; *p; p++) if (!isalnum((unsigned char)*p) && *p != '_') *p = '_';
+    return r;
+}
 /* ───────────────────────── types ───────────────────────── */
 
 typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_VAR, TY_UNKNOWN } TyKind;
@@ -338,13 +382,14 @@ static const char *ty_str(const Type *t) {
         case TY_ARRAY: snprintf(buf, 256, "[%s]", ty_str(ty_elem(t))); return buf;
         default: break;
     }
-    if (t->args.count == 0) { snprintf(buf, 256, "%s", t->name); return buf; }
+    const char *shown = t->kind == TY_NAMED ? key_show(t->name) : t->name;
+    if (t->args.count == 0) { snprintf(buf, 256, "%s", shown); return buf; }
     char inner[200] = "";
     for (int i = 0; i < t->args.count; i++) {
         if (i) strncat(inner, ", ", sizeof inner - strlen(inner) - 1);
         strncat(inner, ty_str(VEC_PTR(&t->args, i, Type)), sizeof inner - strlen(inner) - 1);
     }
-    snprintf(buf, 256, "%s<%s>", t->name, inner);
+    snprintf(buf, 256, "%s<%s>", shown, inner);
     return buf;
 }
 /* C-identifier-safe name: Option_int, Result_int_string */
@@ -359,7 +404,11 @@ static void ty_mangle_into(const Type *t, SB *sb) {
         case TY_ARRAY: sb_append(sb, "arr_"); ty_mangle_into(ty_elem(t), sb); return;
         default: break;
     }
-    sb_append(sb, t->name);
+    {
+        char *m = key_mangle(t->name);   /* keys hold '/' and ':', C identifiers cannot */
+        sb_append(sb, m);
+        free(m);
+    }
     for (int i = 0; i < t->args.count; i++) {
         sb_append(sb, "_");
         ty_mangle_into(VEC_PTR(&t->args, i, Type), sb);
@@ -403,6 +452,8 @@ struct Expr {
     double fval;
     bool bval;
     char *sval;      /* string literal / ident / field / callee / struct or variant name */
+    bool is_qual;    /* sval is already a fully-qualified declaration key */
+    const char *mod; /* module the name was written in, for unqualified lookups */
     char *op;
     char *resolved;  /* mangled callee name after monomorphization */
     Expr *lhs, *rhs;
@@ -433,25 +484,106 @@ struct Stmt {
 typedef struct { char *name; Type *type; bool is_mut; } Field;
 typedef struct { char *name; Vec payload; /* Vec<Type*> */ } Variant;
 
-typedef struct { char *name; Vec type_params; Vec fields; char *mangled; } StructDecl;
-typedef struct { char *name; Vec type_params; Vec variants; char *mangled; } EnumDecl;
+/* Every top-level declaration belongs to a module and is addressed by the key
+   "<module path>:<name>" — see the module section below for what those look like.
+   `name` stays the bare name, for error messages. */
+typedef struct { char *name; char *key; const char *module; bool is_pub;
+                 Vec type_params; Vec fields; char *mangled; } StructDecl;
+typedef struct { char *name; char *key; const char *module; bool is_pub;
+                 Vec type_params; Vec variants; char *mangled; } EnumDecl;
 typedef struct {
-    char *name; Vec type_params; Vec params; /* Vec<Field> */
+    char *name; char *key; const char *module; bool is_pub;
+    Vec type_params; Vec params; /* Vec<Field> */
     Type *ret_type; Vec body; char *mangled;
 } FnDecl;
 
 typedef enum { DECL_STRUCT, DECL_ENUM, DECL_FN } DeclKind;
 typedef struct { DeclKind kind; StructDecl *s; EnumDecl *e; FnDecl *f; } Decl;
 
-static Vec g_decls;  /* Vec<Decl> — generic originals, from prelude + user source */
+static Vec g_decls;  /* Vec<Decl> — generic originals, from prelude + every module */
+
 
 /* ───────────────────────── parser ───────────────────────── */
 
-typedef struct { Lexer lx; Token cur; bool no_struct_lit; } Parser;
+typedef struct { char *alias; char *path; } Alias;
+
+/* A cross-module reference, recorded where it is written so visibility can be
+   checked once every module has been loaded. Qualified names are the only way to
+   reach another module, so checking these covers every cross-module access. */
+typedef struct { char *key; const char *from; const char *file; int line; } XRef;
+static Vec g_xrefs;
+
+typedef struct {
+    Lexer lx;
+    Token cur;
+    bool no_struct_lit;
+    const char *module;    /* module path this file defines */
+    const char *file;      /* for diagnostics */
+    Vec aliases;           /* Vec<Alias> — import aliases in scope */
+    Vec local_types;       /* Vec<char*> — struct/enum names declared in this file */
+    Vec imports;           /* Vec<char*> — module paths this file imports */
+    const Vec *tparams;    /* type parameters of the declaration being parsed */
+} Parser;
 
 static void p_advance(Parser *p) { p->cur = lex_next(&p->lx); }
-static void parser_init(Parser *p, const char *src) {
-    lexer_init(&p->lx, src); p->no_struct_lit = false; p_advance(p);
+
+/* Which type names this file declares — needed while parsing, because a type may
+   be referred to above its own declaration. */
+static void prescan_types(Parser *p, const char *src) {
+    Lexer lx;
+    lexer_init(&lx, src);
+    Token t = lex_next(&lx);
+    while (t.kind != TK_EOF) {
+        if (t.kind == TK_STRUCT || t.kind == TK_ENUM) {
+            Token n = lex_next(&lx);
+            if (n.kind == TK_IDENT) VEC_PUSH_PTR(&p->local_types, n.text);
+            t = n;
+            continue;
+        }
+        t = lex_next(&lx);
+    }
+}
+
+static void parser_init(Parser *p, const char *src, const char *module, const char *file) {
+    lexer_init(&p->lx, src);
+    p->no_struct_lit = false;
+    p->module = module;
+    p->file = file;
+    p->tparams = NULL;
+    vec_init(&p->aliases, sizeof(Alias));
+    vec_init(&p->local_types, sizeof(char *));
+    vec_init(&p->imports, sizeof(char *));
+    prescan_types(p, src);
+    p_advance(p);
+}
+
+static const char *alias_path(Parser *p, const char *name) {
+    for (int i = 0; i < p->aliases.count; i++) {
+        Alias *a = vec_get(&p->aliases, i);
+        if (strcmp(a->alias, name) == 0) return a->path;
+    }
+    return NULL;
+}
+static bool declares_type(Parser *p, const char *name) {
+    for (int i = 0; i < p->local_types.count; i++)
+        if (strcmp(VEC_PTR(&p->local_types, i, char), name) == 0) return true;
+    return false;
+}
+static bool is_tparam(Parser *p, const char *name) {
+    if (!p->tparams) return false;
+    for (int i = 0; i < p->tparams->count; i++)
+        if (strcmp(VEC_PTR(p->tparams, i, char), name) == 0) return true;
+    return false;
+}
+static void note_xref(Parser *p, char *key, int line) {
+    XRef *x = vec_push(&g_xrefs);
+    x->key = key; x->from = p->module; x->file = p->file; x->line = line;
+}
+/* Resolve a name written in this file to a declaration key. */
+static char *resolve_written(Parser *p, const char *name, int line) {
+    if (declares_type(p, name)) return qual_key(p->module, name);
+    return qual_key(MOD_PRELUDE, name);
+    (void)line;
 }
 static const char *tok_name(TokKind k) {
     switch (k) {
@@ -504,7 +636,19 @@ static Type *parse_type(Parser *p) {
     if (strcmp(t.text, "float") == 0) return ty_float();
     if (strcmp(t.text, "bool") == 0) return ty_bool();
     if (strcmp(t.text, "string") == 0) return ty_string();
-    Type *ty = ty_named(t.text);
+    if (is_tparam(p, t.text)) return ty_var(t.text);
+
+    char *key;
+    const char *path = alias_path(p, t.text);
+    if (path && p_check(p, TK_DOT)) {          /* math.Vec */
+        p_advance(p);
+        Token member = p_expect(p, TK_IDENT);
+        key = qual_key(path, member.text);
+        note_xref(p, key, member.line);
+    } else {
+        key = resolve_written(p, t.text, t.line);
+    }
+    Type *ty = ty_named(key);
     if (p_match(p, TK_LT)) {
         do { VEC_PUSH_PTR(&ty->args, parse_type(p)); } while (p_match(p, TK_COMMA));
         p_expect(p, TK_GT);
@@ -519,22 +663,6 @@ static Vec parse_type_params(Parser *p) {
         p_expect(p, TK_GT);
     }
     return tp;
-}
-
-/* `T` parses as a named type; once we know the enclosing declaration's type
-   parameters, rewrite those occurrences into real type variables. */
-static Type *bind_type_vars(Type *t, const Vec *type_params) {
-    if (t->kind == TY_ARRAY) return ty_array(bind_type_vars(ty_elem(t), type_params));
-    if (t->kind != TY_NAMED) return t;
-    if (t->args.count == 0) {
-        for (int i = 0; i < type_params->count; i++)
-            if (strcmp(VEC_PTR(type_params, i, char), t->name) == 0) return ty_var(t->name);
-        return t;
-    }
-    Type *r = ty_named(t->name);
-    for (int i = 0; i < t->args.count; i++)
-        VEC_PUSH_PTR(&r->args, bind_type_vars(VEC_PTR(&t->args, i, Type), type_params));
-    return r;
 }
 
 static Expr *parse_expr(Parser *p);
@@ -583,13 +711,15 @@ static Expr *parse_match(Parser *p, int line) {
 
 /* `"a${x}b"` desugars to `"a" + to_string(x) + "b"`. to_string is a no-op on
    strings, so every printable type interpolates without the caller saying so. */
-static Expr *parse_interp(const Token *tok) {
+static Expr *parse_interp(Parser *p, const Token *tok) {
     Expr *acc = NULL;
     for (int i = 0; i < tok->parts->count; i++) {
         StrPart *sp = vec_get(tok->parts, i);
         Expr *piece;
         if (sp->expr) {
-            Parser sub;
+            /* The fragment is a piece of the same file: it must see the same module,
+               imports, local types and type parameters as the code around it. */
+            Parser sub = *p;
             lexer_init(&sub.lx, sp->expr);
             sub.lx.line = sp->line;      /* so errors point at the real source line */
             sub.no_struct_lit = false;
@@ -621,7 +751,7 @@ static Expr *parse_primary(Parser *p) {
     if (p_check(p, TK_STRING)) {
         Token tok = p->cur;
         p_advance(p);
-        if (tok.parts) return parse_interp(&tok);
+        if (tok.parts) return parse_interp(p, &tok);
         Expr *e = new_expr(EX_STRING, line);
         e->sval = tok.text;
         return e;
@@ -645,10 +775,50 @@ static Expr *parse_primary(Parser *p) {
     if (p_check(p, TK_IDENT)) {
         char *name = p->cur.text;
         p_advance(p);
+
+        /* `math.abs(...)` / `math.Vec { ... }` — a module member, not a field access. */
+        const char *path = alias_path(p, name);
+        if (path && p_check(p, TK_DOT)) {
+            p_advance(p);
+            Token member = p_expect(p, TK_IDENT);
+            char *key = qual_key(path, member.text);
+            note_xref(p, key, member.line);
+            if (p_check(p, TK_LPAREN)) {
+                Expr *e = new_expr(EX_CALL, line);
+                e->sval = key; e->is_qual = true;
+                p_advance(p);
+                while (!p_check(p, TK_RPAREN)) {
+                    VEC_PUSH_PTR(&e->args, parse_expr(p));
+                    if (!p_match(p, TK_COMMA)) break;
+                }
+                p_expect(p, TK_RPAREN);
+                return e;
+            }
+            if (p_check(p, TK_LBRACE) && !p->no_struct_lit) {
+                Expr *e = new_expr(EX_STRUCT_LIT, line);
+                e->sval = key; e->is_qual = true;
+                p_advance(p);
+                while (!p_check(p, TK_RBRACE)) {
+                    Token fname = p_expect(p, TK_IDENT);
+                    p_expect(p, TK_COLON);
+                    FieldInit *fi = vec_push(&e->fields);
+                    fi->name = fname.text;
+                    fi->value = parse_expr(p);
+                    if (!p_match(p, TK_COMMA)) break;
+                }
+                p_expect(p, TK_RBRACE);
+                return e;
+            }
+            Expr *e = new_expr(EX_IDENT, line);
+            e->sval = key; e->is_qual = true;
+            return e;
+        }
+
         if (p_check(p, TK_LPAREN)) {
             /* call or variant constructor — resolved during typecheck */
             Expr *e = new_expr(EX_CALL, line);
             e->sval = name;
+            e->mod = p->module;
             p_advance(p);
             while (!p_check(p, TK_RPAREN)) {
                 VEC_PUSH_PTR(&e->args, parse_expr(p));
@@ -659,7 +829,8 @@ static Expr *parse_primary(Parser *p) {
         }
         if (p_check(p, TK_LBRACE) && !p->no_struct_lit) {
             Expr *e = new_expr(EX_STRUCT_LIT, line);
-            e->sval = name;
+            e->sval = resolve_written(p, name, line);
+            e->is_qual = true;
             p_advance(p);
             while (!p_check(p, TK_RBRACE)) {
                 Token fname = p_expect(p, TK_IDENT);
@@ -674,6 +845,7 @@ static Expr *parse_primary(Parser *p) {
         }
         Expr *e = new_expr(EX_IDENT, line);
         e->sval = name;
+        e->mod = p->module;
         return e;
     }
     if (p_match(p, TK_LPAREN)) {
@@ -842,44 +1014,47 @@ static Vec parse_block(Parser *p) {
     return body;
 }
 
-static void bind_stmts_type_vars(Vec *body, const Vec *tp);
-
-static void bind_expr_type_vars(Expr *e, const Vec *tp) {
-    if (!e) return;
-    bind_expr_type_vars(e->lhs, tp);
-    bind_expr_type_vars(e->rhs, tp);
-    for (int i = 0; i < e->args.count; i++) bind_expr_type_vars(VEC_PTR(&e->args, i, Expr), tp);
-    for (int i = 0; i < e->fields.count; i++) bind_expr_type_vars(((FieldInit *)vec_get(&e->fields, i))->value, tp);
-    for (int i = 0; i < e->arms.count; i++) {
-        MatchArm *arm = vec_get(&e->arms, i);
-        bind_expr_type_vars(arm->value, tp);
-        bind_stmts_type_vars(&arm->body, tp);
-    }
-}
-
-static void bind_stmts_type_vars(Vec *body, const Vec *tp) {
-    for (int i = 0; i < body->count; i++) {
-        Stmt *s = VEC_PTR(body, i, Stmt);
-        if (s->decl_type) s->decl_type = bind_type_vars(s->decl_type, tp);
-        bind_expr_type_vars(s->expr, tp);
-        bind_expr_type_vars(s->expr2, tp);
-        bind_expr_type_vars(s->target, tp);
-        for (int j = 0; j < s->cond_blocks.count; j++) {
-            CondBlock *cb = vec_get(&s->cond_blocks, j);
-            bind_expr_type_vars(cb->cond, tp);
-            bind_stmts_type_vars(&cb->body, tp);
-        }
-        bind_stmts_type_vars(&s->body, tp);
-    }
+/* The last segment of a module path is its default alias: "std/math" -> "math". */
+static const char *path_tail(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
 }
 
 static void parse_program(Parser *p) {
+    /* Imports come first, so an alias is always in scope before it is used. */
+    while (p_check(p, TK_IMPORT)) {
+        int line = p->cur.line;
+        p_advance(p);
+        if (!p_check(p, TK_STRING)) fail(line, "expected a quoted module path after 'import'");
+        char *path = p->cur.text;
+        if (p->cur.parts) fail(line, "a module path cannot contain '${...}'");
+        p_advance(p);
+        for (const char *c = path; *c; c++) {
+            if (!isalnum((unsigned char)*c) && *c != '_' && *c != '/' && *c != '-')
+                fail(line, "'%s' is not a valid module path — use letters, digits, '_', '-' and '/'", path);
+        }
+        if (!*path) fail(line, "the module path is empty");
+        const char *alias = p_match(p, TK_AS) ? p_expect(p, TK_IDENT).text : path_tail(path);
+        if (alias_path(p, alias))
+            fail(line, "'%s' is already imported — use 'as' to give this one a different name", alias);
+        Alias *a = vec_push(&p->aliases);
+        a->alias = (char *)alias; a->path = path;
+        VEC_PUSH_PTR(&p->imports, path);
+    }
+
     while (!p_check(p, TK_EOF)) {
+        if (p_check(p, TK_IMPORT))
+            fail(p->cur.line, "'import' must appear before any declaration");
+        bool is_pub = p_match(p, TK_PUB);
+
         if (p_check(p, TK_STRUCT)) {
             p_advance(p);
             StructDecl *sd = calloc(1, sizeof(StructDecl));
             sd->name = p_expect(p, TK_IDENT).text;
+            sd->module = p->module; sd->is_pub = is_pub;
+            sd->key = qual_key(p->module, sd->name);
             sd->type_params = parse_type_params(p);
+            p->tparams = &sd->type_params;
             vec_init(&sd->fields, sizeof(Field));
             p_expect(p, TK_LBRACE);
             while (!p_check(p, TK_RBRACE)) {
@@ -890,10 +1065,7 @@ static void parse_program(Parser *p) {
                 if (!p_match(p, TK_COMMA)) break;
             }
             p_expect(p, TK_RBRACE);
-            for (int i = 0; i < sd->fields.count; i++) {
-                Field *f = vec_get(&sd->fields, i);
-                f->type = bind_type_vars(f->type, &sd->type_params);
-            }
+            p->tparams = NULL;
             Decl *d = vec_push(&g_decls);
             memset(d, 0, sizeof *d);
             d->kind = DECL_STRUCT; d->s = sd;
@@ -901,7 +1073,10 @@ static void parse_program(Parser *p) {
             p_advance(p);
             EnumDecl *ed = calloc(1, sizeof(EnumDecl));
             ed->name = p_expect(p, TK_IDENT).text;
+            ed->module = p->module; ed->is_pub = is_pub;
+            ed->key = qual_key(p->module, ed->name);
             ed->type_params = parse_type_params(p);
+            p->tparams = &ed->type_params;
             vec_init(&ed->variants, sizeof(Variant));
             p_expect(p, TK_LBRACE);
             while (!p_check(p, TK_RBRACE)) {
@@ -918,12 +1093,7 @@ static void parse_program(Parser *p) {
                 if (!p_match(p, TK_COMMA)) break;
             }
             p_expect(p, TK_RBRACE);
-            for (int i = 0; i < ed->variants.count; i++) {
-                Variant *v = vec_get(&ed->variants, i);
-                for (int j = 0; j < v->payload.count; j++)
-                    *(Type **)vec_get(&v->payload, j) =
-                        bind_type_vars(VEC_PTR(&v->payload, j, Type), &ed->type_params);
-            }
+            p->tparams = NULL;
             Decl *d = vec_push(&g_decls);
             memset(d, 0, sizeof *d);
             d->kind = DECL_ENUM; d->e = ed;
@@ -931,7 +1101,10 @@ static void parse_program(Parser *p) {
             p_advance(p);
             FnDecl *fd = calloc(1, sizeof(FnDecl));
             fd->name = p_expect(p, TK_IDENT).text;
+            fd->module = p->module; fd->is_pub = is_pub;
+            fd->key = qual_key(p->module, fd->name);
             fd->type_params = parse_type_params(p);
+            p->tparams = &fd->type_params;
             vec_init(&fd->params, sizeof(Field));
             p_expect(p, TK_LPAREN);
             while (!p_check(p, TK_RPAREN)) {
@@ -945,39 +1118,39 @@ static void parse_program(Parser *p) {
             p_expect(p, TK_RPAREN);
             fd->ret_type = p_match(p, TK_ARROW) ? parse_type(p) : ty_void();
             fd->body = parse_block(p);
-            for (int i = 0; i < fd->params.count; i++) {
-                Field *pm = vec_get(&fd->params, i);
-                pm->type = bind_type_vars(pm->type, &fd->type_params);
-            }
-            fd->ret_type = bind_type_vars(fd->ret_type, &fd->type_params);
-            bind_stmts_type_vars(&fd->body, &fd->type_params);
+            p->tparams = NULL;
             Decl *d = vec_push(&g_decls);
             memset(d, 0, sizeof *d);
             d->kind = DECL_FN; d->f = fd;
-        } else fail(p->cur.line, "expected 'fn', 'struct' or 'enum' at top level");
+        } else if (is_pub) {
+            fail(p->cur.line, "'pub' must be followed by 'fn', 'struct' or 'enum'");
+        } else {
+            fail(p->cur.line, "expected 'fn', 'struct', 'enum' or 'import' at top level");
+        }
     }
 }
 
 /* ───────────────────────── generic lookups ───────────────────────── */
 
-static StructDecl *find_struct(const char *name) {
+/* Declarations are addressed by key, so all three lookups are exact matches. */
+static StructDecl *find_struct(const char *key) {
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
-        if (d->kind == DECL_STRUCT && strcmp(d->s->name, name) == 0) return d->s;
+        if (d->kind == DECL_STRUCT && strcmp(d->s->key, key) == 0) return d->s;
     }
     return NULL;
 }
-static EnumDecl *find_enum(const char *name) {
+static EnumDecl *find_enum(const char *key) {
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
-        if (d->kind == DECL_ENUM && strcmp(d->e->name, name) == 0) return d->e;
+        if (d->kind == DECL_ENUM && strcmp(d->e->key, key) == 0) return d->e;
     }
     return NULL;
 }
-static FnDecl *find_fn(const char *name) {
+static FnDecl *find_fn(const char *key) {
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
-        if (d->kind == DECL_FN && strcmp(d->f->name, name) == 0) return d->f;
+        if (d->kind == DECL_FN && strcmp(d->f->key, key) == 0) return d->f;
     }
     return NULL;
 }
@@ -986,16 +1159,26 @@ static int variant_index(const EnumDecl *ed, const char *name) {
         if (strcmp(((Variant *)vec_get(&ed->variants, i))->name, name) == 0) return i;
     return -1;
 }
-/* Variants are used unqualified (`Some(x)`, not `Option::Some(x)`), so find the
-   unique enum declaring this variant name. */
+
+/* Which module's body is being type-checked; drives unqualified name resolution. */
+static const char *g_cur_module = MOD_ROOT;
+
+/* What a module can see without qualifying: its own declarations, and the prelude. */
+static bool visible_unqualified(const char *module) {
+    return strcmp(module, g_cur_module) == 0 || strcmp(module, MOD_PRELUDE) == 0;
+}
+
+/* Variants are written unqualified (`Some(x)`, not `Option::Some(x)`), so find the
+   enum declaring this variant name among the ones the current module can see. */
 static EnumDecl *find_enum_by_variant(const char *vname, int line) {
     EnumDecl *found = NULL;
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
         if (d->kind != DECL_ENUM) continue;
+        if (!visible_unqualified(d->e->module)) continue;
         if (variant_index(d->e, vname) < 0) continue;
         if (found) fail(line, "variant '%s' is declared by both '%s' and '%s' — rename one to disambiguate",
-                        vname, found->name, d->e->name);
+                        vname, key_show(found->key), key_show(d->e->key));
         found = d->e;
     }
     return found;
@@ -1058,7 +1241,7 @@ static Expr *clone_expr(Expr *e, const Vec *subst) {
     if (!e) return NULL;
     Expr *c = new_expr(e->kind, e->line);
     c->ival = e->ival; c->fval = e->fval; c->bval = e->bval;
-    c->sval = e->sval; c->op = e->op;
+    c->sval = e->sval; c->op = e->op; c->is_qual = e->is_qual; c->mod = e->mod;
     c->lhs = clone_expr(e->lhs, subst);
     c->rhs = clone_expr(e->rhs, subst);
     for (int i = 0; i < e->args.count; i++)
@@ -1176,7 +1359,7 @@ static void request_type(Type *t, int line) {
     if (gs) {
         Vec subst = make_subst(&gs->type_params, &t->args, "struct", t->name, line);
         StructDecl *sd = calloc(1, sizeof(StructDecl));
-        sd->name = gs->name;
+        sd->name = gs->name; sd->key = gs->key; sd->module = gs->module; sd->is_pub = gs->is_pub;
         sd->mangled = mangled;
         vec_init(&sd->type_params, sizeof(char *));
         vec_init(&sd->fields, sizeof(Field));
@@ -1194,7 +1377,7 @@ static void request_type(Type *t, int line) {
     if (ge) {
         Vec subst = make_subst(&ge->type_params, &t->args, "enum", t->name, line);
         EnumDecl *ed = calloc(1, sizeof(EnumDecl));
-        ed->name = ge->name;
+        ed->name = ge->name; ed->key = ge->key; ed->module = ge->module; ed->is_pub = ge->is_pub;
         ed->mangled = mangled;
         vec_init(&ed->type_params, sizeof(char *));
         vec_init(&ed->variants, sizeof(Variant));
@@ -1218,7 +1401,7 @@ static void request_type(Type *t, int line) {
 /* Queue a function instantiation; returns its mangled name. */
 static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
     SB sb; sb_init(&sb);
-    sb_append(&sb, generic->name);
+    sb_append(&sb, key_mangle(generic->key));
     for (int i = 0; i < type_args->count; i++) {
         sb_append(&sb, "_");
         ty_mangle_into(VEC_PTR(type_args, i, Type), &sb);
@@ -1233,9 +1416,9 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
         fail(line, "too many generic function instantiations — is a generic function "
                    "calling itself with an ever-growing type?");
 
-    Vec subst = make_subst(&generic->type_params, type_args, "function", generic->name, line);
+    Vec subst = make_subst(&generic->type_params, type_args, "function", key_show(generic->key), line);
     FnDecl *fd = calloc(1, sizeof(FnDecl));
-    fd->name = generic->name;
+    fd->name = generic->name; fd->key = generic->key; fd->module = generic->module; fd->is_pub = generic->is_pub;
     fd->mangled = mangled;
     vec_init(&fd->type_params, sizeof(char *));
     vec_init(&fd->params, sizeof(Field));
@@ -1327,7 +1510,7 @@ static Type *tc_variant(Expr *e, Scope *sc, Type *expected, EnumDecl *ge) {
         fail(e->line, "variant '%s' takes %d value(s), got %d", e->sval, gv->payload.count, e->args.count);
 
     Vec subst; vec_init(&subst, sizeof(Binding));
-    if (expected && expected->kind == TY_NAMED && strcmp(expected->name, ge->name) == 0 &&
+    if (expected && expected->kind == TY_NAMED && strcmp(expected->name, ge->key) == 0 &&
         expected->args.count == ge->type_params.count) {
         for (int i = 0; i < ge->type_params.count; i++) {
             Binding *b = vec_push(&subst);
@@ -1340,7 +1523,7 @@ static Type *tc_variant(Expr *e, Scope *sc, Type *expected, EnumDecl *ge) {
         VEC_PUSH_PTR(&labels, labelf("variant '%s' value %d", e->sval, i + 1));
     tc_args(&gv->payload, &e->args, &labels, &subst, sc);
 
-    Type *result = ty_named(ge->name);
+    Type *result = ty_named(ge->key);
     for (int i = 0; i < ge->type_params.count; i++) {
         char *tp = VEC_PTR(&ge->type_params, i, char);
         Type *bound = NULL;
@@ -1368,6 +1551,7 @@ static EnumDecl *find_enum_by_variant_quiet(const char *vname) {
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
         if (d->kind != DECL_ENUM) continue;
+        if (!visible_unqualified(d->e->module)) continue;
         if (variant_index(d->e, vname) < 0) continue;
         if (found) return NULL;
         found = d->e;
@@ -1499,20 +1683,30 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (at->kind == TY_VOID) fail(e->line, "'to_string' needs a value, got void");
         return ty_string();
     }
-    EnumDecl *ge = find_enum_by_variant(e->sval, e->line);
-    if (ge) return tc_variant(e, sc, expected, ge);
-
-    FnDecl *fn = find_fn(e->sval);
-    if (!fn) fail(e->line, "call to undefined function '%s'", e->sval);
+    FnDecl *fn;
+    const char *shown;
+    if (e->is_qual) {
+        fn = find_fn(e->sval);
+        shown = key_show(e->sval);
+        if (!fn) fail(e->line, "module '%.*s' has no function '%s'",
+                      (int)(strrchr(e->sval, ':') - e->sval), e->sval, key_name(e->sval));
+    } else {
+        EnumDecl *ge = find_enum_by_variant(e->sval, e->line);
+        if (ge) return tc_variant(e, sc, expected, ge);
+        char *key = qual_key(e->mod ? e->mod : g_cur_module, e->sval);
+        fn = find_fn(key);
+        shown = e->sval;
+        if (!fn) fail(e->line, "call to undefined function '%s'", e->sval);
+    }
     if (e->args.count != fn->params.count)
-        fail(e->line, "'%s' expects %d argument(s), got %d", e->sval, fn->params.count, e->args.count);
+        fail(e->line, "'%s' expects %d argument(s), got %d", shown, fn->params.count, e->args.count);
 
     Vec subst; vec_init(&subst, sizeof(Binding));
     Vec wants; vec_init(&wants, sizeof(Type *));
     Vec labels; vec_init(&labels, sizeof(char *));
     for (int i = 0; i < fn->params.count; i++) {
         VEC_PUSH_PTR(&wants, ((Field *)vec_get(&fn->params, i))->type);
-        VEC_PUSH_PTR(&labels, labelf("argument %d to '%s'", i + 1, e->sval));
+        VEC_PUSH_PTR(&labels, labelf("argument %d to '%s'", i + 1, shown));
     }
     tc_args(&wants, &e->args, &labels, &subst, sc);
 
@@ -1524,7 +1718,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             Binding *b = vec_get(&subst, j);
             if (strcmp(b->name, tp) == 0) { bound = b->type; break; }
         }
-        if (!bound) fail(e->line, "cannot infer type '%s' for call to '%s'", tp, e->sval);
+        if (!bound) fail(e->line, "cannot infer type '%s' for call to '%s'", tp, shown);
         VEC_PUSH_PTR(&type_args, bound);
     }
     e->resolved = request_fn(fn, &type_args, e->line);
@@ -1533,12 +1727,12 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
 
 static Type *tc_struct_lit(Expr *e, Scope *sc, Type *expected) {
     StructDecl *gs = find_struct(e->sval);
-    if (!gs) fail(e->line, "unknown struct '%s'", e->sval);
+    if (!gs) fail(e->line, "unknown struct '%s'", key_show(e->sval));
     if (e->fields.count != gs->fields.count)
-        fail(e->line, "struct '%s' has %d field(s), got %d", e->sval, gs->fields.count, e->fields.count);
+        fail(e->line, "struct '%s' has %d field(s), got %d", key_show(e->sval), gs->fields.count, e->fields.count);
 
     Vec subst; vec_init(&subst, sizeof(Binding));
-    if (expected && expected->kind == TY_NAMED && strcmp(expected->name, gs->name) == 0 &&
+    if (expected && expected->kind == TY_NAMED && strcmp(expected->name, gs->key) == 0 &&
         expected->args.count == gs->type_params.count) {
         for (int i = 0; i < gs->type_params.count; i++) {
             Binding *b = vec_push(&subst);
@@ -1556,14 +1750,14 @@ static Type *tc_struct_lit(Expr *e, Scope *sc, Type *expected) {
             Field *f = vec_get(&gs->fields, j);
             if (strcmp(f->name, fi->name) == 0) { df = f; break; }
         }
-        if (!df) fail(e->line, "struct '%s' has no field '%s'", e->sval, fi->name);
+        if (!df) fail(e->line, "struct '%s' has no field '%s'", key_show(e->sval), fi->name);
         VEC_PUSH_PTR(&wants, df->type);
         VEC_PUSH_PTR(&vals, fi->value);
         VEC_PUSH_PTR(&labels, labelf("field '%s'", fi->name));
     }
     tc_args(&wants, &vals, &labels, &subst, sc);
 
-    Type *result = ty_named(gs->name);
+    Type *result = ty_named(gs->key);
     for (int i = 0; i < gs->type_params.count; i++) {
         char *tp = VEC_PTR(&gs->type_params, i, char);
         Type *bound = NULL;
@@ -1571,7 +1765,7 @@ static Type *tc_struct_lit(Expr *e, Scope *sc, Type *expected) {
             Binding *b = vec_get(&subst, j);
             if (strcmp(b->name, tp) == 0) { bound = b->type; break; }
         }
-        if (!bound) fail(e->line, "cannot infer type '%s' of struct '%s'", tp, gs->name);
+        if (!bound) fail(e->line, "cannot infer type '%s' of struct '%s'", tp, key_show(gs->key));
         VEC_PUSH_PTR(&result->args, bound);
     }
     return result;
@@ -1639,12 +1833,12 @@ static Type *tc_match(Expr *e, Scope *sc, Type *expected) {
 static Type *tc_try(Expr *e, Scope *sc) {
     Type *it = tc_expr(e->lhs, sc, NULL);
     if (it->kind != TY_NAMED || it->args.count == 0 ||
-        (strcmp(it->name, "Result") != 0 && strcmp(it->name, "Option") != 0))
+        (strcmp(it->name, PRELUDE_RESULT) != 0 && strcmp(it->name, PRELUDE_OPTION) != 0))
         fail(e->line, "'?' works on Result or Option, got %s", ty_str(it));
     if (!g_cur_ret || g_cur_ret->kind != TY_NAMED || strcmp(g_cur_ret->name, it->name) != 0)
         fail(e->line, "'?' on %s requires the enclosing function to return %s too, but it returns %s",
-             ty_str(it), it->name, g_cur_ret ? ty_str(g_cur_ret) : "nothing");
-    if (strcmp(it->name, "Result") == 0) {
+             ty_str(it), key_show(it->name), g_cur_ret ? ty_str(g_cur_ret) : "nothing");
+    if (strcmp(it->name, PRELUDE_RESULT) == 0) {
         Type *ie = VEC_PTR(&it->args, 1, Type);
         Type *oe = VEC_PTR(&g_cur_ret->args, 1, Type);
         if (!ty_eq(ie, oe))
@@ -1834,12 +2028,47 @@ static void tc_fn(FnDecl *fd) {
         scope_declare(&sc, pm->name, pm->type, pm->is_mut);
     }
     g_cur_ret = fd->ret_type;
+    g_cur_module = fd->module ? fd->module : MOD_ROOT;
     tc_block(&fd->body, &sc);
     scope_pop(&sc);
 }
 
+/* Qualified names are the only way to reach another module, so checking the
+   references the parser recorded covers every cross-module access. */
+static void check_visibility(void) {
+    for (int i = 0; i < g_xrefs.count; i++) {
+        XRef *x = vec_get(&g_xrefs, i);
+        const char *colon = strrchr(x->key, ':');
+        size_t modlen = (size_t)(colon - x->key);
+        if (strncmp(x->key, x->from, modlen) == 0 && x->from[modlen] == 0) continue;
+
+        bool found = false, is_pub = false;
+        const char *what = "item";
+        for (int j = 0; j < g_decls.count; j++) {
+            Decl *d = vec_get(&g_decls, j);
+            const char *k = d->kind == DECL_STRUCT ? d->s->key
+                          : d->kind == DECL_ENUM   ? d->e->key : d->f->key;
+            if (strcmp(k, x->key) != 0) continue;
+            found = true;
+            is_pub = d->kind == DECL_STRUCT ? d->s->is_pub
+                   : d->kind == DECL_ENUM   ? d->e->is_pub : d->f->is_pub;
+            what = d->kind == DECL_STRUCT ? "struct"
+                 : d->kind == DECL_ENUM   ? "enum" : "function";
+            break;
+        }
+        g_filename = x->file;
+        if (!found)
+            fail(x->line, "module '%.*s' has no '%s'", (int)modlen, x->key, key_name(x->key));
+        if (!is_pub)
+            fail(x->line, "%s '%s' is private to module '%.*s' — mark it 'pub' to use it "
+                          "from another module", what, key_name(x->key), (int)modlen, x->key);
+    }
+}
+
 static void monomorphize_and_check(void) {
-    FnDecl *main_fn = find_fn("main");
+    check_visibility();
+
+    FnDecl *main_fn = find_fn(MOD_ROOT ":main");
     if (!main_fn) fail(0, "no 'main' function defined");
     if (main_fn->params.count != 0) fail(0, "'main' must take no arguments");
     if (main_fn->ret_type->kind != TY_VOID) fail(0, "'main' must not declare a return type");
@@ -1970,7 +2199,7 @@ static void cg_try(Expr *e, SB *out, SB *pre, int ind) {
     sb_appendf(pre, "%s %s = %s;\n", im, tmp, inner.data);
 
     char *om = ty_mangle(g_cg_ret);
-    bool is_result = strcmp(it->name, "Result") == 0;
+    bool is_result = strcmp(it->name, PRELUDE_RESULT) == 0;
     const char *bad = is_result ? "Err" : "None";
     indent_to(pre, ind);
     sb_appendf(pre, "if (%s.tag == %s_TAG_%s) {\n", tmp, im, bad);
@@ -2604,7 +2833,7 @@ static void emit_types(SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.4 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.5 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n\n");
@@ -2661,9 +2890,9 @@ static const char *PRELUDE =
     "enum Option<T> { None, Some(T) }\n"
     "enum Result<T, E> { Ok(T), Err(E) }\n";
 
-static char *read_file(const char *path) {
+static char *read_file_opt(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "klangc: cannot open '%s'\n", path); exit(1); }
+    if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -2673,10 +2902,118 @@ static char *read_file(const char *path) {
     fclose(f);
     return buf;
 }
+static char *read_file(const char *path) {
+    char *s = read_file_opt(path);
+    if (!s) { fprintf(stderr, "klangc: cannot open '%s'\n", path); exit(1); }
+    return s;
+}
+
+/* ── module loading ───────────────────────────────────────────────────────
+ * `import "std/math"` is resolved against, in order:
+ *   1. the project root — the directory of the file named on the command line
+ *   2. each directory in the KLANG_PATH environment variable
+ *   3. alongside the compiler: <exe>, <exe>/.., and <exe>/../lib/klang
+ * so the standard library is found without anyone configuring anything.
+ *
+ * Resolution deliberately does NOT depend on which file is doing the importing.
+ * A path therefore always names the same module, so a module reached from two
+ * different places is still one module with one set of declarations.
+ *
+ * A module is loaded once no matter how many times it is imported, and an
+ * import cycle is reported rather than followed.
+ */
+static const char *g_exe_dir = ".";
+static const char *g_root_dir = ".";
+static Vec g_loaded;    /* Vec<char*> — module paths already parsed */
+static Vec g_loading;   /* Vec<char*> — the current import chain, for cycle reports */
+
+static bool vec_has_str(Vec *v, const char *s) {
+    for (int i = 0; i < v->count; i++)
+        if (strcmp(VEC_PTR(v, i, char), s) == 0) return true;
+    return false;
+}
+/* "dir/of/importer" for a file path, or "." when it has no directory part. */
+static char *dir_of(const char *path) {
+    const char *slash = NULL;
+    for (const char *c = path; *c; c++) if (*c == '/' || *c == '\\') slash = c;
+    if (!slash) return strdup(".");
+    return dupn(path, (int)(slash - path));
+}
+static char *join_path(const char *dir, const char *rel) {
+    size_t n = strlen(dir) + strlen(rel) + 8;
+    char *r = malloc(n);
+    snprintf(r, n, "%s/%s.kkg", dir, rel);
+    return r;
+}
+
+static void load_module(const char *path, const char *importer, int line);
+
+/* Parse one file as `module`, then load whatever it imports. */
+static void load_source(char *src, const char *file, const char *module) {
+    Parser p;
+    g_filename = file;
+    parser_init(&p, src, module, file);
+    parse_program(&p);
+    for (int i = 0; i < p.imports.count; i++)
+        load_module(VEC_PTR(&p.imports, i, char), file, 0);
+}
+
+static void load_module(const char *path, const char *importer, int line) {
+    if (vec_has_str(&g_loaded, path)) return;
+    if (vec_has_str(&g_loading, path)) {
+        g_filename = importer;
+        fail(line, "import cycle: module '%s' ends up importing itself", path);
+    }
+
+    char *file = join_path(g_root_dir, path);
+    char *src = read_file_opt(file);
+    if (!src) {
+        const char *env = getenv("KLANG_PATH");
+        if (env) {
+            char *copy = strdup(env);
+            for (char *tok = copy; tok && *tok;) {
+                char *sep = strpbrk(tok, ";:");
+                /* A drive letter like C:\ is not a separator. */
+                while (sep && *sep == ':' && sep == tok + 1 && isalpha((unsigned char)tok[0]))
+                    sep = strpbrk(sep + 1, ";:");
+                if (sep) *sep = 0;
+                free(file);
+                file = join_path(tok, path);
+                src = read_file_opt(file);
+                if (src) break;
+                tok = sep ? sep + 1 : NULL;
+            }
+            free(copy);
+        }
+    }
+    if (!src) {
+        const char *roots[3];
+        char buf1[1024], buf2[1024];
+        snprintf(buf1, sizeof buf1, "%s/..", g_exe_dir);
+        snprintf(buf2, sizeof buf2, "%s/../lib/klang", g_exe_dir);
+        roots[0] = g_exe_dir; roots[1] = buf1; roots[2] = buf2;
+        for (int i = 0; i < 3 && !src; i++) {
+            free(file);
+            file = join_path(roots[i], path);
+            src = read_file_opt(file);
+        }
+    }
+    if (!src) {
+        g_filename = importer;
+        fail(line, "cannot find module '%s' — looked for '%s/%s.kkg', next to the "
+                   "compiler%s", path, g_root_dir, path,
+             getenv("KLANG_PATH") ? ", and in KLANG_PATH" : "");
+    }
+
+    VEC_PUSH_PTR(&g_loading, (char *)path);
+    load_source(src, file, path);
+    g_loading.count--;
+    VEC_PUSH_PTR(&g_loaded, (char *)path);
+}
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.4)\n\n"
+        printf("klangc — Klang compiler (0.5)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -2684,7 +3021,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.4.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.5.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -2696,17 +3033,14 @@ int main(int argc, char **argv) {
     vec_init(&g_mono_fns, sizeof(FnDecl *));
     vec_init(&g_mono_arrays, sizeof(Type *));
     vec_init(&g_fn_queue, sizeof(FnDecl *));
+    vec_init(&g_xrefs, sizeof(XRef));
+    vec_init(&g_loaded, sizeof(char *));
+    vec_init(&g_loading, sizeof(char *));
+    g_exe_dir = dir_of(argv[0]);
+    g_root_dir = dir_of(in_path);
 
-    Parser pre;
-    g_filename = "<prelude>";
-    parser_init(&pre, PRELUDE);
-    parse_program(&pre);
-
-    g_filename = in_path;
-    char *src = read_file(in_path);
-    Parser p;
-    parser_init(&p, src);
-    parse_program(&p);
+    load_source(strdup(PRELUDE), "<prelude>", MOD_PRELUDE);
+    load_source(read_file(in_path), in_path, MOD_ROOT);
 
     monomorphize_and_check();
 
