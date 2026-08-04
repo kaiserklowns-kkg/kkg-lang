@@ -1224,6 +1224,9 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
         ty_mangle_into(VEC_PTR(type_args, i, Type), &sb);
     }
     char *mangled = sb.data;
+    /* `main` is emitted as klang_main; the real C main is a wrapper that anchors
+       the collector's stack scan below every Klang frame. */
+    if (strcmp(generic->name, "main") == 0) mangled = strdup("klang_main");
     if (find_mono_fn(mangled)) return mangled;
 
     if (g_mono_fns.count > MAX_INSTANCES)
@@ -1447,6 +1450,23 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
         tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
         return ty_void();
+    }
+    if (strcmp(e->sval, "assert") == 0) {
+        if (e->args.count != 2)
+            fail(e->line, "'assert' takes 2 arguments: the condition and a message");
+        Type *ct = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_bool());
+        if (ct->kind != TY_BOOL) fail(e->line, "'assert' needs a bool condition, got %s", ty_str(ct));
+        Type *mt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_string());
+        if (mt->kind != TY_STRING) fail(e->line, "'assert' needs a string message, got %s", ty_str(mt));
+        return ty_void();
+    }
+    if (strcmp(e->sval, "gc_collect") == 0) {
+        if (e->args.count != 0) fail(e->line, "'gc_collect' takes no arguments");
+        return ty_void();
+    }
+    if (strcmp(e->sval, "gc_heap") == 0) {
+        if (e->args.count != 0) fail(e->line, "'gc_heap' takes no arguments");
+        return ty_int();
     }
     if (strcmp(e->sval, "len") == 0) {
         if (e->args.count != 1) fail(e->line, "'len' takes exactly 1 argument");
@@ -2080,6 +2100,16 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 sb_append(out, ")");
                 break;
             }
+            if (strcmp(e->sval, "assert") == 0) {
+                sb_append(out, "klang_assert(");
+                cg_expr(VEC_PTR(&e->args, 0, Expr), out, pre, ind);
+                sb_append(out, ", ");
+                cg_expr(VEC_PTR(&e->args, 1, Expr), out, pre, ind);
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "gc_collect") == 0) { sb_append(out, "klang_gc_collect()"); break; }
+            if (strcmp(e->sval, "gc_heap") == 0) { sb_append(out, "klang_gc_heap()"); break; }
             if (strcmp(e->sval, "len") == 0) {
                 Expr *arg = VEC_PTR(&e->args, 0, Expr);
                 if (arg->type->kind == TY_STRING) {
@@ -2269,20 +2299,174 @@ static void cg_stmts(Vec *body, SB *sb, int ind) {
     for (int i = 0; i < body->count; i++) cg_stmt(VEC_PTR(body, i, Stmt), sb, ind);
 }
 
+/* Klang's garbage collector, emitted into every program.
+ *
+ * Conservative mark-sweep. "Conservative" means the collector does not need the
+ * compiler to tell it where the live pointers are: it scans the machine stack and
+ * callee-saved registers, and treats any word that happens to point at one of our
+ * objects as a reference. The cost is that an integer that looks like a pointer can
+ * keep an object alive a little longer than necessary. The payoff is that it needs
+ * no cooperation from generated code — every C local, every compiler temporary, and
+ * every value the optimizer parked in a register is covered automatically, with no
+ * shadow stack to keep in sync and nothing to get wrong at an early `return`.
+ *
+ * String literals live in .rodata rather than the heap, so they simply never appear
+ * in the object set and are ignored — no interning pass needed.
+ */
+static const char *GC_RUNTIME =
+    "/* ── Klang GC: conservative mark-sweep ─────────────────────────────── */\n"
+    "typedef struct KObj { struct KObj *next; size_t size; unsigned char mark; } KObj;\n"
+    "#define KPAY(o) ((void *)((char *)(o) + sizeof(KObj)))\n"
+    "#define KHDR(p) ((KObj *)((char *)(p) - sizeof(KObj)))\n"
+    "\n"
+    "KObj *k_objs = NULL;            /* every live object, newest first */\n"
+    "void **k_tab = NULL;            /* open-addressed set of payload addresses */\n"
+    "size_t k_tab_cap = 0, k_tab_n = 0;\n"
+    "char *k_lo = NULL, *k_hi = NULL;   /* payload address range, for a fast reject */\n"
+    "size_t k_live = 0, k_limit = 4u << 20;\n"
+    "void *k_stack_bottom = NULL;\n"
+    "KObj **k_gray = NULL; size_t k_gray_n = 0, k_gray_cap = 0;\n"
+    "size_t k_collections = 0;\n"
+    "\n"
+    "void k_oom(void) { fprintf(stderr, \"klang: out of memory\\n\"); exit(1); }\n"
+    "\n"
+    "size_t k_hash(void *p) {\n"
+    "    uintptr_t x = (uintptr_t)p;\n"
+    "    x ^= x >> 33; x *= (uintptr_t)0xff51afd7ed558ccdULL;\n"
+    "    x ^= x >> 29; x *= (uintptr_t)0xc4ceb9fe1a85ec53ULL;\n"
+    "    x ^= x >> 32;\n"
+    "    return (size_t)x;\n"
+    "}\n"
+    "void k_tab_put(void **tab, size_t cap, void *p) {\n"
+    "    size_t i = k_hash(p) & (cap - 1);\n"
+    "    while (tab[i]) i = (i + 1) & (cap - 1);\n"
+    "    tab[i] = p;\n"
+    "}\n"
+    "void k_tab_resize(size_t cap) {\n"
+    "    void **nt = calloc(cap, sizeof(void *));\n"
+    "    if (!nt) k_oom();\n"
+    "    for (size_t i = 0; i < k_tab_cap; i++) if (k_tab[i]) k_tab_put(nt, cap, k_tab[i]);\n"
+    "    free(k_tab); k_tab = nt; k_tab_cap = cap;\n"
+    "}\n"
+    "void k_tab_add(void *p) {\n"
+    "    if ((k_tab_n + 1) * 10 >= k_tab_cap * 7) k_tab_resize(k_tab_cap ? k_tab_cap * 2 : 1024);\n"
+    "    k_tab_put(k_tab, k_tab_cap, p); k_tab_n++;\n"
+    "}\n"
+    "int k_tab_has(void *p) {\n"
+    "    if (!k_tab_cap) return 0;\n"
+    "    size_t i = k_hash(p) & (k_tab_cap - 1);\n"
+    "    while (k_tab[i]) { if (k_tab[i] == p) return 1; i = (i + 1) & (k_tab_cap - 1); }\n"
+    "    return 0;\n"
+    "}\n"
+    "\n"
+    "void k_gray_push(KObj *o) {\n"
+    "    if (k_gray_n == k_gray_cap) {\n"
+    "        k_gray_cap = k_gray_cap ? k_gray_cap * 2 : 256;\n"
+    "        k_gray = realloc(k_gray, k_gray_cap * sizeof(KObj *));\n"
+    "        if (!k_gray) k_oom();\n"
+    "    }\n"
+    "    k_gray[k_gray_n++] = o;\n"
+    "}\n"
+    "/* A word is a reference only if it is exactly the payload address of a live\n"
+    "   object. Interior pointers are not followed, and never arise: the only pointer\n"
+    "   we store into an object is an array's data buffer, kept at its base. */\n"
+    "void k_mark(void *p) {\n"
+    "    if ((char *)p < k_lo || (char *)p > k_hi) return;\n"
+    "    if (!k_tab_has(p)) return;\n"
+    "    KObj *o = KHDR(p);\n"
+    "    if (o->mark) return;\n"
+    "    o->mark = 1;\n"
+    "    k_gray_push(o);\n"
+    "}\n"
+    "void k_scan(void *lo, void *hi) {\n"
+    "    char *a = (char *)lo, *b = (char *)hi;\n"
+    "    if (a > b) { char *t = a; a = b; b = t; }\n"
+    "    while ((uintptr_t)a % sizeof(void *)) a++;\n"
+    "    for (; a + sizeof(void *) <= b; a += sizeof(void *)) {\n"
+    "        void *cand;\n"
+    "        memcpy(&cand, a, sizeof cand);\n"
+    "        k_mark(cand);\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "void klang_gc_collect(void) {\n"
+    "    if (!k_stack_bottom) return;   /* before main() set the anchor */\n"
+    "    jmp_buf regs;\n"
+    "    memset(&regs, 0, sizeof regs);\n"
+    "    setjmp(regs);                  /* force callee-saved registers onto the stack */\n"
+    "    for (KObj *o = k_objs; o; o = o->next) o->mark = 0;\n"
+    "    k_gray_n = 0;\n"
+    "    k_scan(&regs, (char *)&regs + sizeof regs);\n"
+    "    k_scan((void *)&regs, k_stack_bottom);\n"
+    "    while (k_gray_n) {\n"
+    "        KObj *o = k_gray[--k_gray_n];\n"
+    "        void *pl = KPAY(o);\n"
+    "        k_scan(pl, (char *)pl + o->size);\n"
+    "    }\n"
+    "    KObj **link = &k_objs;\n"
+    "    size_t live = 0, n = 0;\n"
+    "    while (*link) {\n"
+    "        KObj *o = *link;\n"
+    "        if (o->mark) { live += o->size; n++; link = &o->next; }\n"
+    "        else { *link = o->next; free(o); }\n"
+    "    }\n"
+    "    /* Rebuild the address set from the survivors — cheaper and simpler than\n"
+    "       deleting from an open-addressed table one entry at a time. */\n"
+    "    size_t cap = 1024;\n"
+    "    while (cap * 7 <= (n + 1) * 10) cap *= 2;\n"
+    "    free(k_tab); k_tab = calloc(cap, sizeof(void *));\n"
+    "    if (!k_tab) k_oom();\n"
+    "    k_tab_cap = cap; k_tab_n = 0;\n"
+    "    k_lo = NULL; k_hi = NULL;\n"
+    "    for (KObj *o = k_objs; o; o = o->next) {\n"
+    "        void *pl = KPAY(o);\n"
+    "        k_tab_put(k_tab, k_tab_cap, pl); k_tab_n++;\n"
+    "        if (!k_lo || (char *)pl < k_lo) k_lo = pl;\n"
+    "        if (!k_hi || (char *)pl > k_hi) k_hi = pl;\n"
+    "    }\n"
+    "    k_live = live;\n"
+    "    k_limit = live * 2 < (4u << 20) ? (4u << 20) : live * 2;\n"
+    "    k_collections++;\n"
+    "}\n"
+    "\n"
+    "void *klang_gc_alloc(size_t n) {\n"
+    "    if (k_live + n > k_limit) klang_gc_collect();\n"
+    "    KObj *o = malloc(sizeof(KObj) + n);\n"
+    "    if (!o) { klang_gc_collect(); o = malloc(sizeof(KObj) + n); if (!o) k_oom(); }\n"
+    "    o->size = n; o->mark = 0; o->next = k_objs; k_objs = o;\n"
+    "    void *pl = KPAY(o);\n"
+    "    if (!k_lo || (char *)pl < k_lo) k_lo = pl;\n"
+    "    if (!k_hi || (char *)pl > k_hi) k_hi = pl;\n"
+    "    k_tab_add(pl);\n"
+    "    k_live += n;\n"
+    "    return pl;\n"
+    "}\n"
+    "void *klang_gc_grow(void *p, size_t n) {\n"
+    "    void *q = klang_gc_alloc(n);\n"
+    "    if (p) { size_t old = KHDR(p)->size; memcpy(q, p, old < n ? old : n); }\n"
+    "    return q;\n"
+    "}\n"
+    "void klang_gc_init(void *bottom) { k_stack_bottom = bottom; }\n"
+    "int64_t klang_gc_heap(void) { return (int64_t)k_live; }\n"
+    "\n";
+
 static const char *RUNTIME =
     /* Non-static so an unused helper doesn't trip -Wunused-function in the output. */
-    "/* Klang runtime prelude */\n"
-    "char *klang_strdup(const char *s) { size_t n = strlen(s) + 1; char *r = malloc(n); memcpy(r, s, n); return r; }\n"
+    "/* ── Klang runtime ─────────────────────────────────────────────────── */\n"
+    "char *klang_strdup(const char *s) { size_t n = strlen(s) + 1; char *r = klang_gc_alloc(n); memcpy(r, s, n); return r; }\n"
     "char *klang_str_concat(const char *a, const char *b) {\n"
     "    size_t la = strlen(a), lb = strlen(b);\n"
-    "    char *r = malloc(la + lb + 1);\n"
+    "    char *r = klang_gc_alloc(la + lb + 1);\n"
     "    memcpy(r, a, la); memcpy(r + la, b, lb + 1);\n"
     "    return r;\n"
     "}\n"
     "bool klang_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0; }\n"
-    "char *klang_int_to_string(int64_t v) { char *r = malloc(24); snprintf(r, 24, \"%\" PRId64 \"\", v); return r; }\n"
-    "char *klang_float_to_string(double v) { char *r = malloc(32); snprintf(r, 32, \"%g\", v); return r; }\n"
+    "char *klang_int_to_string(int64_t v) { char *r = klang_gc_alloc(24); snprintf(r, 24, \"%\" PRId64 \"\", v); return r; }\n"
+    "char *klang_float_to_string(double v) { char *r = klang_gc_alloc(32); snprintf(r, 32, \"%g\", v); return r; }\n"
     "char *klang_bool_to_string(bool v) { return klang_strdup(v ? \"true\" : \"false\"); }\n"
+    "void klang_assert(bool ok, const char *msg) {\n"
+    "    if (!ok) { fprintf(stderr, \"klang: assertion failed: %s\\n\", msg); exit(1); }\n"
+    "}\n"
     "void klang_bounds(int64_t i, int64_t len) {\n"
     "    fprintf(stderr, \"klang: index %\" PRId64 \" is out of bounds for an array of length %\" PRId64 \"\\n\", i, len);\n"
     "    exit(1);\n"
@@ -2294,20 +2478,23 @@ static void emit_array(const Type *t, SB *sb) {
     char *m = ty_mangle(t);
     const char *e = c_type(ty_elem(t));
     sb_appendf(sb, "typedef struct %s_s { int64_t len; int64_t cap; %s *data; } *%s;\n", m, e, m);
+    /* The header is allocated first and kept in a local, so it is visible to the
+       collector on the stack while the data buffer is being allocated. */
     sb_appendf(sb, "%s %s_new(int64_t n) {\n"
-                   "    %s a = malloc(sizeof(struct %s_s));\n"
-                   "    a->len = n; a->cap = n < 4 ? 4 : n;\n"
-                   "    a->data = malloc(sizeof(%s) * (size_t)a->cap);\n"
+                   "    %s a = klang_gc_alloc(sizeof(struct %s_s));\n"
+                   "    a->len = n; a->cap = n < 4 ? 4 : n; a->data = NULL;\n"
+                   "    a->data = klang_gc_alloc(sizeof(%s) * (size_t)a->cap);\n"
                    "    return a;\n}\n", m, m, m, m, e);
     sb_appendf(sb, "%s *%s_at(%s a, int64_t i) {\n"
                    "    if (i < 0 || i >= a->len) klang_bounds(i, a->len);\n"
                    "    return &a->data[i];\n}\n", e, m, m);
     sb_appendf(sb, "void %s_push(%s a, %s v) {\n"
                    "    if (a->len == a->cap) {\n"
-                   "        a->cap *= 2;\n"
-                   "        a->data = realloc(a->data, sizeof(%s) * (size_t)a->cap);\n"
+                   "        int64_t ncap = a->cap * 2;\n"
+                   "        %s *nd = klang_gc_grow(a->data, sizeof(%s) * (size_t)ncap);\n"
+                   "        a->data = nd; a->cap = ncap;\n"
                    "    }\n"
-                   "    a->data[a->len++] = v;\n}\n\n", m, m, e, e);
+                   "    a->data[a->len++] = v;\n}\n\n", m, m, e, e, e);
 }
 
 /* Collect the mangled names of named types a mono type embeds by value. */
@@ -2417,9 +2604,11 @@ static void emit_types(SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.3 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.4 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
-    sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n\n");
+    sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
+    sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n\n");
+    sb_append(sb, GC_RUNTIME);
     sb_append(sb, RUNTIME);
     sb_append(sb, "\n");
 
@@ -2455,6 +2644,15 @@ static void codegen(SB *sb) {
         if (is_main) sb_append(sb, "    return 0;\n");
         sb_append(sb, "}\n\n");
     }
+
+    /* The collector scans from its own frame up to this anchor. Taking the anchor
+       here — in a frame that strictly encloses klang_main — guarantees every Klang
+       local lies inside that range, whatever order the C compiler lays frames out. */
+    sb_append(sb, "int main(void) {\n");
+    sb_append(sb, "    int _kanchor = 0;\n");
+    sb_append(sb, "    klang_gc_init(&_kanchor);\n");
+    sb_append(sb, "    return klang_main();\n");
+    sb_append(sb, "}\n");
 }
 
 /* ───────────────────────── driver ───────────────────────── */
@@ -2478,7 +2676,7 @@ static char *read_file(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.3)\n\n"
+        printf("klangc — Klang compiler (0.4)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -2486,7 +2684,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.3.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.4.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";

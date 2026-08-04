@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.3 — Phase 2 complete
+## Status: v0.4 — Phase 3 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -30,10 +30,15 @@ aspirational.
 - **`for x in xs` and `for i in a..b`**, plus `len` and `push`.
 - **String interpolation** — `"${name} v${version}"`, no `to_string` needed.
 - **`mut` parameters**, so a function can say it modifies what it was handed.
+- **Our own garbage collector** — conservative mark-sweep over the machine stack and
+  registers, written for Klang rather than borrowed. A benchmark that peaked at
+  **126 MB** while leaking now peaks at **18 MB**. See
+  [The collector](docs/LANGUAGE_SPEC.md#the-collector) for the design and its tradeoffs.
+- **`assert(cond, msg)`**, plus `gc_collect()` and `gc_heap()` to inspect the heap.
 
 Not yet: maps, closures, traits, modules, concurrency, and all tooling
-(REPL, formatter, linter, package manager). See the
-[spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
+(REPL, formatter, linter, package manager). Integer overflow still wraps silently.
+See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
 

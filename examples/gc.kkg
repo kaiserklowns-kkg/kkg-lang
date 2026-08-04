@@ -1,0 +1,60 @@
+// Klang's garbage collector, exercised.
+//
+// This program is a regression test as much as a demo: if the collector ever
+// frees something still reachable, an `assert` below fails and the process
+// exits non-zero, so `make check` goes red.
+
+struct Node {
+    id: int,
+    label: string,
+    tags: [string],
+}
+
+fn makeNode(i: int) -> Node {
+    let mut tags: [string] = []
+    push(tags, "tag-${i}-a")
+    push(tags, "tag-${i}-b")
+    return Node { id: i, label: "node-${i}", tags: tags }
+}
+
+fn main() {
+    // A live set the collector must never touch, with pointers nested two deep:
+    // an array of structs, each holding a string and an array of strings.
+    let mut keep: [Node] = []
+    for i in 0..500 {
+        push(keep, makeNode(i))
+    }
+
+    // Churn: every iteration allocates several objects and immediately drops
+    // them. This is what forces collections to run.
+    let mut churn = 0
+    for i in 0..120000 {
+        let junk = "garbage ${i} ${i * 7}"
+        let mut tmp: [int] = []
+        push(tmp, i)
+        push(tmp, len(junk))
+        churn = churn + tmp[1]
+    }
+    assert(churn > 0, "churn loop did not run")
+
+    gc_collect()
+
+    // Everything above must have survived, byte for byte.
+    for i in 0..len(keep) {
+        let n = keep[i]
+        assert(n.id == i, "node id was corrupted")
+        assert(n.label == "node-${i}", "node label was collected or corrupted")
+        assert(len(n.tags) == 2, "tag array lost entries")
+        assert(n.tags[0] == "tag-${i}-a", "tag 0 was collected or corrupted")
+        assert(n.tags[1] == "tag-${i}-b", "tag 1 was collected or corrupted")
+    }
+
+    // The garbage really is gone: the live set is a few hundred KB, not the
+    // tens of MB the churn loop allocated in total.
+    gc_collect()
+    let live = gc_heap()
+    println("live set after ${len(keep)} nodes + 120k allocations: ${live} bytes")
+    assert(live < 1000000, "heap did not shrink — garbage was retained")
+
+    println("GC: ${len(keep)} nodes intact, nothing live was collected")
+}

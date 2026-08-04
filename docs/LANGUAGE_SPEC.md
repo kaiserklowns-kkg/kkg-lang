@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.3)
+# Klang Language Spec (v0.4)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -9,7 +9,7 @@
 
 - **Memory model: garbage collected.** No borrow checker, no lifetimes, no `move`/`&`/`&mut`.
   This is the single biggest simplification vs. Rust and the main reason Klang aims to be as
-  easy to pick up as Go.
+  easy to pick up as Go. The collector is Klang's own — see [The collector](#the-collector).
 - **Safety comes from the type system, not from ownership tracking:**
   - No implicit null. Absence is `Option<T>` (`Some(x)` / `None`).
   - Fallible operations return `Result<T, E>` (`Ok(x)` / `Err(e)`), propagated with `?`.
@@ -181,6 +181,54 @@ let s = first_or(None, "default")       // T = string, inferred from the 2nd arg
 let p = Pair { left: 1, right: "one" }  // Pair<int, string>
 ```
 
+## The collector
+
+Klang ships its own garbage collector — not a dependency — because the runtime is
+where latency, concurrency, and future WASM support are ultimately decided, and none
+of those are steerable from behind someone else's allocator.
+
+**Design: conservative mark-sweep.** *Conservative* means the collector does not ask
+the compiler where the live pointers are. It scans the machine stack and the
+callee-saved registers (spilled with `setjmp`), and treats any word that is exactly
+the address of one of its objects as a reference.
+
+The tradeoff, stated plainly:
+
+- **Cost** — a non-pointer that happens to look like one keeps an object alive a bit
+  longer than necessary, and objects can never be moved, which rules out a compacting
+  collector later without changing this design.
+- **Payoff** — no cooperation is needed from generated code. Every C local, every
+  compiler temporary, and every value the optimizer parked in a register is covered
+  automatically. The alternative, a precise shadow stack, needs every temporary
+  registered and every early `return` to unwind it correctly — far more places to get
+  it subtly wrong, and the failure mode is a freed live object rather than a retained
+  dead one.
+
+Details that matter:
+
+- **Stack anchor.** The C `main` is a wrapper that records a stack address and then
+  calls `klang_main`. Anchoring in an *enclosing* frame is what makes the scan range
+  correct no matter how the C compiler orders locals — anchoring inside `klang_main`
+  itself silently misses any local the compiler placed above the anchor.
+- **String literals** live in `.rodata`, never in the heap, so they simply never
+  appear in the object set. No interning pass is needed.
+- **Object identification** is an exact-address hash set with a heap-range fast
+  reject, so interior pointers are never followed — and never arise, since the one
+  pointer stored inside an object (an array's data buffer) is kept at its base.
+- **Pacing** is adaptive: collect when the heap exceeds `max(4 MB, 2 × live)`.
+
+Two builtins make it observable, and `assert(cond, msg)` makes tests fail loudly:
+
+```kkg
+gc_collect()            // force a collection
+let bytes = gc_heap()   // bytes currently held
+```
+
+[examples/gc.kkg](../examples/gc.kkg) is a regression test: it holds 500 nodes live
+across 120k allocations and asserts every field survived. It is verified at `-O0`
+through `-O3` and `-Os`, because conservative collection is exactly the kind of thing
+that can pass at one optimization level and fail at another.
+
 ### Concurrency (target)
 
 ```kkg
@@ -193,7 +241,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.3, Phase 2 complete)
+## Implemented today (v0.4, Phase 3 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -226,11 +274,19 @@ let received = ch.receive()
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 3 additions**
+- **Klang's own garbage collector** — conservative mark-sweep over the machine stack
+  and registers, with an adaptive collection threshold. Memory is now bounded: the
+  benchmark that peaked at 126 MB before the GC now peaks at 18 MB.
+- `gc_collect()` and `gc_heap()` to force a collection and read live bytes
+- `assert(cond, msg)` — aborts with a message and a non-zero exit status
+
 Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
 - Maps, closures, traits, modules/imports
+- Integer overflow still wraps silently rather than trapping
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)
 - `to_string` / `==` on structs and enums (match on them instead)
