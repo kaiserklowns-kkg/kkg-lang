@@ -1,0 +1,540 @@
+// std/ui — the front end, the way React taught everyone to think about it.
+//
+//     let mut clicks = 0
+//
+//     fn view() -> ui.Node {
+//         return ui.col([
+//             ui.h1("Klang"),
+//             ui.button("click me", || { clicks += 1; ui.refresh() }),
+//             ui.line("${clicks} clicks"),
+//         ])
+//     }
+//
+//     fn main() { ui.mount("#app", view) }
+//
+// A component is a function that returns a Node. State is ordinary Klang. You
+// change it, call `refresh`, and the whole view is rebuilt — but the *DOM* is
+// not: `refresh` diffs the new tree against the last one and touches only what
+// differs, so what you are typing into an input survives, and so does scroll
+// position and focus.
+//
+// Handlers are closures, not names. That is possible because JavaScript never
+// holds one: the closures live in a Klang array, the DOM carries an index into
+// it, and one listener per event type hands the index back. The array is rebuilt
+// every render, so nothing accumulates.
+
+import "std/dom"
+import "std/string" as str
+
+pub struct Attr {
+    name: string,
+    value: string,
+}
+
+// An event handler is given the value of whatever fired it and, for a key event,
+// the key. Most handlers ignore both, which is what `on`/`button` are for.
+pub struct Handler {
+    event: string,
+    run: fn(string, string),
+}
+
+pub struct Element {
+    tag: string,
+    key: string,          // "" means unkeyed; see `keyed`
+    attrs: [Attr],
+    events: [Handler],
+    kids: [Node],
+}
+
+pub enum Node {
+    Text(string),
+    Elem(Element),
+}
+
+// ── building ──────────────────────────────────────────────────────────
+//
+// Every element takes its children directly. Attributes, when there are any, go
+// through `with`, so the common case has no empty list in it.
+
+pub fn el(tag: string, kids: [Node]) -> Node {
+    return Elem(Element { tag: tag, key: "", attrs: [], events: [], kids: kids })
+}
+
+// A single line of text inside a tag: `ui.tag("p", "hello")`.
+pub fn tag(name: string, text: string) -> Node {
+    return el(name, [Text(text)])
+}
+
+pub fn text(s: string) -> Node {
+    return Text(s)
+}
+
+// `ui.div([...]).with([ui.class("card")])` — attributes added after the fact, so
+// they cost nothing when there are none.
+pub fn with(n: Node, attrs: [Attr]) -> Node {
+    return match n {
+        Text(s)  => Text(s),
+        Elem(e)  => Elem(Element { tag: e.tag, key: e.key, attrs: join(e.attrs, attrs),
+                                   events: e.events, kids: e.kids }),
+    }
+}
+
+// `ui.on(node, "click", handler)` — or use the shorthands below.
+pub fn on(n: Node, event: string, run: fn(string, string)) -> Node {
+    return match n {
+        Text(s) => Text(s),
+        Elem(e) => Elem(Element { tag: e.tag, key: e.key, attrs: e.attrs,
+                                  events: joinEvents(e.events,
+                                      [Handler { event: event, run: run }]),
+                                  kids: e.kids }),
+    }
+}
+
+// A key tells `refresh` which element is which when a list is reordered or an
+// item is removed from the middle. Without one it matches by position, which is
+// right until the list changes shape.
+pub fn keyed(n: Node, k: string) -> Node {
+    return match n {
+        Text(s) => Text(s),
+        Elem(e) => Elem(Element { tag: e.tag, key: k, attrs: e.attrs,
+                                  events: e.events, kids: e.kids }),
+    }
+}
+
+fn join(a: [Attr], b: [Attr]) -> [Attr] {
+    let mut out: [Attr] = []
+    for x in a { push(out, x) }
+    for x in b { push(out, x) }
+    return out
+}
+
+fn joinEvents(a: [Handler], b: [Handler]) -> [Handler] {
+    let mut out: [Handler] = []
+    for x in a { push(out, x) }
+    for x in b { push(out, x) }
+    return out
+}
+
+// ── attributes ────────────────────────────────────────────────────────
+
+pub fn attr(name: string, value: string) -> Attr { return Attr { name: name, value: value } }
+pub fn class(c: string) -> Attr { return attr("class", c) }
+pub fn id(v: string) -> Attr { return attr("id", v) }
+pub fn href(v: string) -> Attr { return attr("href", v) }
+pub fn src(v: string) -> Attr { return attr("src", v) }
+pub fn alt(v: string) -> Attr { return attr("alt", v) }
+pub fn title(v: string) -> Attr { return attr("title", v) }
+pub fn placeholder(v: string) -> Attr { return attr("placeholder", v) }
+pub fn value(v: string) -> Attr { return attr("value", v) }
+pub fn kind(v: string) -> Attr { return attr("type", v) }
+pub fn checked(b: bool) -> Attr { return attr("checked", if b { "checked" } else { "" }) }
+pub fn disabled(b: bool) -> Attr { return attr("disabled", if b { "disabled" } else { "" }) }
+
+// ── the elements worth having by name ─────────────────────────────────
+
+pub fn div(kids: [Node]) -> Node { return el("div", kids) }
+pub fn span(kids: [Node]) -> Node { return el("span", kids) }
+pub fn col(kids: [Node]) -> Node { return el("div", kids) }
+pub fn nav(kids: [Node]) -> Node { return el("nav", kids) }
+pub fn header(kids: [Node]) -> Node { return el("header", kids) }
+pub fn footer(kids: [Node]) -> Node { return el("footer", kids) }
+pub fn section(kids: [Node]) -> Node { return el("section", kids) }
+pub fn list(kids: [Node]) -> Node { return el("ul", kids) }
+pub fn item(kids: [Node]) -> Node { return el("li", kids) }
+pub fn form(kids: [Node]) -> Node { return el("form", kids) }
+
+// One-line text elements, because that is what these almost always hold.
+pub fn h1(s: string) -> Node { return tag("h1", s) }
+pub fn h2(s: string) -> Node { return tag("h2", s) }
+pub fn h3(s: string) -> Node { return tag("h3", s) }
+pub fn line(s: string) -> Node { return tag("p", s) }
+pub fn label(s: string) -> Node { return tag("label", s) }
+pub fn code(s: string) -> Node { return tag("code", s) }
+pub fn strong(s: string) -> Node { return tag("strong", s) }
+
+pub fn link(text: string, to: string) -> Node {
+    return with(tag("a", text), [href(to)])
+}
+
+pub fn input(attrs: [Attr]) -> Node {
+    return with(el("input", []), attrs)
+}
+
+pub fn image(source: string, description: string) -> Node {
+    return with(el("img", []), [src(source), alt(description)])
+}
+
+// ── the shorthands that make a page short ─────────────────────────────
+
+pub fn button(text: string, run: fn()) -> Node {
+    return on(tag("button", text), "click", |_v, _k| run())
+}
+
+pub fn clickable(n: Node, run: fn()) -> Node {
+    return on(n, "click", |_v, _k| run())
+}
+
+// The handler is given what was typed.
+pub fn onInput(n: Node, run: fn(string)) -> Node {
+    return on(n, "input", |v, _k| run(v))
+}
+
+pub fn onChange(n: Node, run: fn(string)) -> Node {
+    return on(n, "change", |v, _k| run(v))
+}
+
+// The handler is given the key. `submit` never reloads the page.
+pub fn onKey(n: Node, run: fn(string)) -> Node {
+    return on(n, "keydown", |_v, k| run(k))
+}
+
+pub fn onSubmit(n: Node, run: fn()) -> Node {
+    return on(n, "submit", |_v, _k| run())
+}
+
+// ── rendering to text, for a server ───────────────────────────────────
+//
+// The same Node, rendered as HTML rather than mounted. Handlers are dropped,
+// because there is nothing on the other end to run them.
+
+fn escapeText(s: string) -> string {
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+fn escapeAttr(s: string) -> string {
+    return escapeText(s).replace("\"", "&quot;").replace("'", "&#39;")
+}
+
+fn isVoid(t: string) -> bool {
+    for v in ["area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "source", "track", "wbr"] {
+        if t == v {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn toHtml(n: Node) -> string {
+    return match n {
+        Text(s) => escapeText(s),
+        Elem(e) => elementToHtml(e),
+    }
+}
+
+fn elementToHtml(e: Element) -> string {
+    let mut out = "<" + e.tag
+    for a in e.attrs {
+        if a.value != "" {
+            out = out + " " + a.name + "=\"" + escapeAttr(a.value) + "\""
+        }
+    }
+    if isVoid(e.tag) {
+        return out + ">"
+    }
+    out = out + ">"
+    for k in e.kids {
+        out = out + toHtml(k)
+    }
+    return out + "</" + e.tag + ">"
+}
+
+// ── mounting, and the diff ────────────────────────────────────────────
+
+// What is on the page: the node that produced it, its DOM handle, and the same
+// for its children. Compared against the next render to work out what changed.
+struct Mounted {
+    node: Node,
+    handle: int,
+    kids: [Mounted],
+}
+
+fn emptyView() -> Node { return Text("") }
+
+let mut rootHandle = 0
+let mut rootView = emptyView
+let mut live: [Mounted] = []      // holds 0 or 1: what is currently mounted
+let mut handlers: [fn(string, string)] = []
+let mut listening: [string] = []
+
+// Put a view on the page and keep it there. `view` is called now and again on
+// every `refresh`.
+pub fn mount(sel: string, view: fn() -> Node) {
+    dom.nodeTable()
+    rootHandle = dom.nodeAt(sel)
+    if rootHandle == 0 {
+        dom.warn("ui.mount: nothing matches '${sel}'")
+        return
+    }
+    rootView = view
+    live = []
+    refresh()
+}
+
+// Rebuild the view and apply the difference. Call it after changing state.
+pub fn refresh() {
+    if rootHandle == 0 {
+        return
+    }
+    handlers = []
+    let next = rootView()
+    if live.len() == 0 {
+        let m = create(next)
+        dom.nodeAppend(rootHandle, m.handle)
+        push(live, m)
+    } else {
+        live[0] = patch(rootHandle, live[0], next)
+    }
+}
+
+// The value of an input, by selector, for the cases a handler does not cover.
+pub fn valueOf(sel: string) -> string {
+    dom.nodeTable()
+    let h = dom.nodeAt(sel)
+    if h == 0 {
+        return ""
+    }
+    let v = dom.nodeValue(h)
+    dom.nodeDrop(h)
+    return v
+}
+
+pub fn focus(sel: string) {
+    dom.nodeTable()
+    let h = dom.nodeAt(sel)
+    if h != 0 {
+        dom.nodeFocus(h)
+        dom.nodeDrop(h)
+    }
+}
+
+// Handlers are stored here and referenced from the DOM by index, so JavaScript
+// never has to hold a Klang closure.
+fn bind(h: Handler, node: int) {
+    let idx = handlers.len()
+    push(handlers, h.run)
+    dom.nodeSetAttr(node, "data-k-" + h.event, "${idx}")
+    listenFor(h.event)
+}
+
+fn listenFor(event: string) {
+    for e in listening {
+        if e == event {
+            return
+        }
+    }
+    push(listening, event)
+    dom.uiListen(rootHandle, event)
+}
+
+// Called from JavaScript when a bound element fires.
+export fn klangUiDispatch(id: int, value: string, key: string) {
+    if id >= 0 && id < handlers.len() {
+        handlers[id](value, key)
+    }
+}
+
+fn create(n: Node) -> Mounted {
+    return match n {
+        Text(s) => Mounted { node: n, handle: dom.nodeNewText(s), kids: [] },
+        Elem(e) => createElement(n, e),
+    }
+}
+
+fn createElement(n: Node, e: Element) -> Mounted {
+    let h = dom.nodeNew(e.tag)
+    for a in e.attrs {
+        if a.value != "" {
+            dom.nodeSetAttr(h, a.name, a.value)
+        }
+    }
+    for ev in e.events {
+        bind(ev, h)
+    }
+    let mut kids: [Mounted] = []
+    for k in e.kids {
+        let m = create(k)
+        dom.nodeAppend(h, m.handle)
+        push(kids, m)
+    }
+    return Mounted { node: n, handle: h, kids: kids }
+}
+
+fn drop(m: Mounted) {
+    for k in m.kids {
+        drop(k)
+    }
+    dom.nodeDrop(m.handle)
+}
+
+fn tagOf(n: Node) -> string {
+    return match n {
+        Text(_) => "",
+        Elem(e) => e.tag,
+    }
+}
+
+fn keyOf(n: Node) -> string {
+    return match n {
+        Text(_) => "",
+        Elem(e) => e.key,
+    }
+}
+
+fn textOf(n: Node) -> string {
+    return match n {
+        Text(s) => s,
+        Elem(_) => "",
+    }
+}
+
+// Replace when the shape changed, patch in place when it did not. Patching in
+// place is the whole point: it is what leaves an <input> alone.
+fn patch(parent: int, old: Mounted, next: Node) -> Mounted {
+    if tagOf(old.node) != tagOf(next) {
+        let fresh = create(next)
+        dom.nodeReplaceChild(parent, old.handle, fresh.handle)
+        drop(old)
+        return fresh
+    }
+    return match next {
+        Text(s) => patchText(old, s),
+        Elem(e) => patchElement(old, next, e),
+    }
+}
+
+fn patchText(old: Mounted, s: string) -> Mounted {
+    if textOf(old.node) != s {
+        dom.nodeSetText(old.handle, s)
+    }
+    return Mounted { node: Text(s), handle: old.handle, kids: [] }
+}
+
+fn patchElement(old: Mounted, next: Node, e: Element) -> Mounted {
+    let before = match old.node {
+        Elem(o) => o,
+        Text(_) => e,
+    }
+
+    // Attributes that went away, then the ones that arrived or changed.
+    for a in before.attrs {
+        if findAttr(e.attrs, a.name) == "" && a.value != "" {
+            dom.nodeDelAttr(old.handle, a.name)
+        }
+    }
+    for a in e.attrs {
+        if a.value == "" {
+            if findAttr(before.attrs, a.name) != "" {
+                dom.nodeDelAttr(old.handle, a.name)
+            }
+        } else if findAttr(before.attrs, a.name) != a.value {
+            dom.nodeSetAttr(old.handle, a.name, a.value)
+        }
+    }
+
+    // Handler indices are assigned afresh every render, so they are always
+    // rewritten rather than compared.
+    for ev in e.events {
+        bind(ev, old.handle)
+    }
+
+    return Mounted { node: next, handle: old.handle,
+                     kids: patchKids(old.handle, old.kids, e.kids) }
+}
+
+fn findAttr(attrs: [Attr], name: string) -> string {
+    for a in attrs {
+        if a.name == name {
+            return a.value
+        }
+    }
+    return ""
+}
+
+// Keyed children are matched by key, so removing one from the middle of a list
+// moves nothing else. Unkeyed children are matched by position, which is right
+// as long as the list keeps its shape.
+fn patchKids(parent: int, olds: [Mounted], nexts: [Node]) -> [Mounted] {
+    if anyKeyed(nexts) {
+        return patchKeyed(parent, olds, nexts)
+    }
+    let mut out: [Mounted] = []
+    let mut i = 0
+    while i < nexts.len() {
+        if i < olds.len() {
+            push(out, patch(parent, olds[i], nexts[i]))
+        } else {
+            let m = create(nexts[i])
+            dom.nodeAppend(parent, m.handle)
+            push(out, m)
+        }
+        i += 1
+    }
+    let mut j = nexts.len()
+    while j < olds.len() {
+        dom.nodeRemoveChild(parent, olds[j].handle)
+        drop(olds[j])
+        j += 1
+    }
+    return out
+}
+
+fn anyKeyed(ns: [Node]) -> bool {
+    for n in ns {
+        if keyOf(n) != "" {
+            return true
+        }
+    }
+    return false
+}
+
+fn patchKeyed(parent: int, olds: [Mounted], nexts: [Node]) -> [Mounted] {
+    let mut out: [Mounted] = []
+    let mut used: [bool] = []
+    for _ in olds {
+        push(used, false)
+    }
+
+    let mut i = 0
+    while i < nexts.len() {
+        let k = keyOf(nexts[i])
+        let found = indexOfKey(olds, used, k)
+        if found >= 0 {
+            used[found] = true
+            let m = patch(parent, olds[found], nexts[i])
+            // Only move it if it is not already where it belongs. Re-inserting a
+            // node that has not moved is wasted work, and it would drop focus.
+            if found != i {
+                dom.nodeInsertAt(parent, m.handle, i)
+            }
+            push(out, m)
+        } else {
+            let m = create(nexts[i])
+            dom.nodeInsertAt(parent, m.handle, i)
+            push(out, m)
+        }
+        i += 1
+    }
+
+    let mut j = 0
+    while j < olds.len() {
+        if !used[j] {
+            dom.nodeRemoveChild(parent, olds[j].handle)
+            drop(olds[j])
+        }
+        j += 1
+    }
+    return out
+}
+
+fn indexOfKey(olds: [Mounted], used: [bool], k: string) -> int {
+    if k == "" {
+        return -1
+    }
+    for i in 0..olds.len() {
+        if !used[i] && keyOf(olds[i].node) == k {
+            return i
+        }
+    }
+    return -1
+}

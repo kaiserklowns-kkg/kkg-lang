@@ -49,10 +49,12 @@ test-new: bin/klangc
 test-web: bin/klangc
 	@command -v emcc >/dev/null || { echo "skipping test-web: emcc not installed"; exit 0; }
 	@./bin/klangc web build examples/web.kkg
+	@./bin/klangc web build examples/ui.kkg
 	@ran=0; \
 	for js in bun node; do \
 		command -v $$js >/dev/null || continue; \
 		printf '%-5s ' "$$js"; $$js tests/web_test.js "$$PWD/examples/web/app.js" || exit 1; \
+		printf '%-5s ' "$$js"; $$js tests/ui_test.js "$$PWD/.klang/ui/app.js" || exit 1; \
 		ran=1; \
 	done; \
 	[ $$ran = 1 ] || echo "skipping test-web: neither bun nor node installed"

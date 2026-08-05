@@ -127,7 +127,7 @@ typedef enum {
     TK_TRUE, TK_FALSE, TK_LET, TK_MUT, TK_FN, TK_STRUCT, TK_ENUM, TK_MATCH,
     TK_IF, TK_ELSE, TK_WHILE, TK_FOR, TK_IN, TK_RETURN, TK_PUB, TK_IMPORT, TK_AS,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE, TK_LBRACKET, TK_RBRACKET,
-    TK_COMMA, TK_COLON, TK_ARROW, TK_FATARROW, TK_DOT, TK_DOTDOT, TK_QUESTION,
+    TK_COMMA, TK_COLON, TK_SEMI, TK_ARROW, TK_FATARROW, TK_DOT, TK_DOTDOT, TK_QUESTION,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_ANDAND, TK_OROR, TK_NOT, TK_PIPE,
@@ -336,6 +336,7 @@ static Token lex_next(Lexer *lx) {
         case ']': return make_tok(TK_RBRACKET, line);
         case ',': return make_tok(TK_COMMA, line);
         case ':': return make_tok(TK_COLON, line);
+        case ';': return make_tok(TK_SEMI, line);
         case '.': return make_tok(TK_DOT, line);
         case '?': return make_tok(TK_QUESTION, line);
         case '=': return make_tok(TK_EQ, line);
@@ -811,6 +812,7 @@ static const char *tok_name(TokKind k) {
         case TK_COLON: return "':'"; case TK_COMMA: return "','";
         case TK_EQ: return "'='"; case TK_ARROW: return "'->'";
         case TK_FATARROW: return "'=>'"; case TK_GT: return "'>'";
+        case TK_SEMI: return "';'";
         default: return "token";
     }
 }
@@ -1411,7 +1413,15 @@ static Stmt *parse_stmt(Parser *p) {
 static Vec parse_block(Parser *p) {
     Vec body; vec_init(&body, sizeof(Stmt *));
     p_expect(p, TK_LBRACE);
-    while (!p_check(p, TK_RBRACE)) VEC_PUSH_PTR(&body, parse_stmt(p));
+    while (!p_check(p, TK_RBRACE)) {
+        VEC_PUSH_PTR(&body, parse_stmt(p));
+        /* A newline already ends a statement. `;` is for the case a newline cannot
+           express — two statements on one line — which is what makes a one-line
+           closure body possible: `|| { n += 1; refresh() }`. It is a separator,
+           not a terminator: writing one at the end of every line is noise, and
+           nothing here asks for it. */
+        while (p_match(p, TK_SEMI)) { }
+    }
     p_expect(p, TK_RBRACE);
     return body;
 }
@@ -2472,6 +2482,21 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             callee->type = v->type;
             e->lhs = callee;               /* marks this as an indirect call */
             return tc_indirect(e, v->type, sc, labelf("'%s'", e->sval));
+        }
+    }
+    /* And so is module-level state holding one. Without this, a `let mut` that
+       holds a closure could be assigned but never called, which is a strange hole
+       to leave in the middle of the language. */
+    {
+        ConstDecl *cd = find_const(e->is_qual ? e->sval
+                                   : qual_key(e->mod ? e->mod : g_cur_module, e->sval));
+        if (cd && cd->type && cd->type->kind == TY_FN) {
+            Expr *callee = new_expr(EX_CONSTREF, e->line);
+            callee->sval = cd->name;
+            callee->resolved = cd->mangled;
+            callee->type = cd->type;
+            e->lhs = callee;
+            return tc_indirect(e, cd->type, sc, labelf("'%s'", e->sval));
         }
     }
     /* A function you defined wins over a builtin of the same name: your own module

@@ -101,6 +101,124 @@ js fn jsFocus(sel: string) {
     if (el !== null) el.focus()
 }
 
+// ── individual nodes, addressed by handle ─────────────────────────────
+//
+// std/ui needs to create, patch and move single elements rather than replace
+// whole subtrees, and it cannot hold a JavaScript object: the collector can
+// neither see one nor free it. So the JavaScript side keeps a table of elements
+// and Klang holds an int into it. Handles are freed explicitly when a node is
+// dropped from the tree, which is why `nodeDrop` exists.
+
+js fn jsNodeTable() {
+    if (Module.__kNodes === undefined) {
+        Module.__kNodes = new Map()
+        Module.__kNext = 1
+    }
+}
+
+js fn jsNodeAt(sel: string) -> int {
+    var el = document.querySelector(sel)
+    if (el === null) return 0
+    var h = Module.__kNext++
+    Module.__kNodes.set(h, el)
+    return h
+}
+
+js fn jsNodeNew(tag: string) -> int {
+    var h = Module.__kNext++
+    Module.__kNodes.set(h, document.createElement(tag))
+    return h
+}
+
+js fn jsNodeNewText(s: string) -> int {
+    var h = Module.__kNext++
+    Module.__kNodes.set(h, document.createTextNode(s))
+    return h
+}
+
+js fn jsNodeDrop(h: int) {
+    Module.__kNodes.delete(h)
+}
+
+js fn jsNodeSetText(h: int, s: string) {
+    var el = Module.__kNodes.get(h)
+    if (el !== undefined) el.textContent = s
+}
+
+js fn jsNodeSetAttr(h: int, name: string, value: string) {
+    var el = Module.__kNodes.get(h)
+    if (el === undefined) return
+    if (name === "value") el.value = value
+    else if (name === "checked") { if (value === "") el.checked = false; else el.checked = true }
+    else el.setAttribute(name, value)
+}
+
+js fn jsNodeDelAttr(h: int, name: string) {
+    var el = Module.__kNodes.get(h)
+    if (el !== undefined) el.removeAttribute(name)
+}
+
+js fn jsNodeAppend(parent: int, child: int) {
+    var p = Module.__kNodes.get(parent)
+    var c = Module.__kNodes.get(child)
+    if (p !== undefined && c !== undefined) p.appendChild(c)
+}
+
+js fn jsNodeInsertAt(parent: int, child: int, index: int) {
+    var p = Module.__kNodes.get(parent)
+    var c = Module.__kNodes.get(child)
+    if (p === undefined || c === undefined) return
+    var before = p.childNodes[index]
+    if (before === undefined || before === null) p.appendChild(c)
+    else p.insertBefore(c, before)
+}
+
+js fn jsNodeRemoveChild(parent: int, child: int) {
+    var p = Module.__kNodes.get(parent)
+    var c = Module.__kNodes.get(child)
+    if (p !== undefined && c !== undefined && c.parentNode === p) p.removeChild(c)
+}
+
+js fn jsNodeReplaceChild(parent: int, old: int, fresh: int) {
+    var p = Module.__kNodes.get(parent)
+    var o = Module.__kNodes.get(old)
+    var f = Module.__kNodes.get(fresh)
+    if (p !== undefined && o !== undefined && f !== undefined && o.parentNode === p) {
+        p.replaceChild(f, o)
+    }
+}
+
+js fn jsNodeValue(h: int) -> string {
+    var el = Module.__kNodes.get(h)
+    if (el === undefined) return ""
+    if (el.type === "checkbox") return el.checked ? "true" : ""
+    return String(el.value === undefined ? "" : el.value)
+}
+
+js fn jsNodeFocus(h: int) {
+    var el = Module.__kNodes.get(h)
+    if (el !== undefined && el.focus !== undefined) el.focus()
+}
+
+// One listener per event type, on the mount point. It walks up to whatever
+// carries a handler index for this event and hands the index back to Klang, which
+// looks the closure up in its own table. JavaScript never holds a Klang value.
+js fn jsUiListen(root: int, event: string) {
+    var p = Module.__kNodes.get(root)
+    if (p === undefined) return
+    var key = "data-k-" + event
+    p.addEventListener(event, function(ev) {
+        var el = ev.target.closest === undefined ? null : ev.target.closest("[" + key + "]")
+        if (el === null || !p.contains(el)) return
+        if (event === "submit") ev.preventDefault()
+        var id = parseInt(el.getAttribute(key), 10)
+        var value = el.type === "checkbox" ? (el.checked ? "true" : "")
+                  : (el.value === undefined ? "" : String(el.value))
+        Module.ccall("klangUiDispatch", null, ["number", "string", "string"],
+                     [id, value, ev.key === undefined ? "" : String(ev.key)])
+    })
+}
+
 // ── events ────────────────────────────────────────────────────────────
 //
 // Four shapes, because a handler usually needs to know something about what
@@ -312,6 +430,24 @@ pub fn useStyle(text: string) { unsafe { jsUseStyle("klang-style", text) } }
 
 // A second sheet, kept separate so it can be replaced on its own.
 pub fn useStyleNamed(id: string, text: string) { unsafe { jsUseStyle(id, text) } }
+
+// ── the node handles std/ui builds on ─────────────────────────────────
+
+pub fn nodeTable() { unsafe { jsNodeTable() } }
+pub fn nodeAt(sel: string) -> int { return unsafe { jsNodeAt(sel) } }
+pub fn nodeNew(tag: string) -> int { return unsafe { jsNodeNew(tag) } }
+pub fn nodeNewText(s: string) -> int { return unsafe { jsNodeNewText(s) } }
+pub fn nodeDrop(h: int) { unsafe { jsNodeDrop(h) } }
+pub fn nodeSetText(h: int, s: string) { unsafe { jsNodeSetText(h, s) } }
+pub fn nodeSetAttr(h: int, name: string, v: string) { unsafe { jsNodeSetAttr(h, name, v) } }
+pub fn nodeDelAttr(h: int, name: string) { unsafe { jsNodeDelAttr(h, name) } }
+pub fn nodeAppend(p: int, c: int) { unsafe { jsNodeAppend(p, c) } }
+pub fn nodeInsertAt(p: int, c: int, i: int) { unsafe { jsNodeInsertAt(p, c, i) } }
+pub fn nodeRemoveChild(p: int, c: int) { unsafe { jsNodeRemoveChild(p, c) } }
+pub fn nodeReplaceChild(p: int, o: int, f: int) { unsafe { jsNodeReplaceChild(p, o, f) } }
+pub fn nodeValue(h: int) -> string { return unsafe { jsNodeValue(h) } }
+pub fn nodeFocus(h: int) { unsafe { jsNodeFocus(h) } }
+pub fn uiListen(root: int, event: string) { unsafe { jsUiListen(root, event) } }
 
 // Install one listener under `sel` for every `html.on(event, ...)` inside it.
 // Called once; it keeps working for everything mounted afterwards, because the

@@ -55,7 +55,43 @@ class El {
   setAttribute(k, v) { this.attrs[k] = v; }
   removeAttribute(k) { delete this.attrs[k]; }
   focus() { this.focused = true; }
-  remove() {}
+  remove() { if (this.parent) this.parent.removeChild(this); }
+
+  // std/ui patches individual nodes rather than replacing subtrees, so the stub
+  // has to support the same operations a real DOM does — and identity has to
+  // survive them, since that is exactly what the diff is being tested for.
+  get childNodes() { return this.children; }
+  get parentNode() { return this.parent; }
+  appendChild(c) {
+    if (c.parent) c.parent.removeChild(c);
+    c.parent = this;
+    this.children.push(c);
+    return c;
+  }
+  insertBefore(c, before) {
+    if (c === before) return c;   // the DOM treats this as a no-op; so must this
+    if (c.parent) c.parent.removeChild(c);
+    c.parent = this;
+    const at = this.children.indexOf(before);
+    if (at === -1) this.children.push(c);
+    else this.children.splice(at, 0, c);
+    return c;
+  }
+  removeChild(c) {
+    const at = this.children.indexOf(c);
+    if (at !== -1) this.children.splice(at, 1);
+    c.parent = null;
+    return c;
+  }
+  replaceChild(fresh, old) {
+    const at = this.children.indexOf(old);
+    if (at === -1) return old;
+    if (fresh.parent) fresh.parent.removeChild(fresh);
+    fresh.parent = this;
+    this.children[at] = fresh;
+    old.parent = null;
+    return old;
+  }
   insertAdjacentHTML(_, html) { this.innerHTML = this.innerHTML + html; }
   contains(other) {
     for (let n = other; n; n = n.parent) if (n === this) return true;
@@ -138,6 +174,11 @@ function install() {
     },
     getElementById: (id) => globalThis.document.querySelector("#" + id),
     createElement: (tag) => new El(tag),
+    createTextNode: (s) => {
+      const t = new El("#text");
+      t.textParts = [s];
+      return t;
+    },
   };
   head.appendChild = (el) => { el.parent = head; head.children.push(el); };
   globalThis.localStorage = {
