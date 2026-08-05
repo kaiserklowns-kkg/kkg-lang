@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.6 — Phase 5 complete
+## Status: v0.7 — Phase 6 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -44,10 +44,16 @@ aspirational.
 - **Text** — four string primitives in the compiler, and everything else
   (`split`, `join`, `trim`, `replace`, case, padding, `parseInt` → `Result`) written in
   Klang in [std/string](std/string.kkg).
+- **Closures** — `fn(A) -> R` types, `|a, b| ...` literals, parameter types inferred
+  from context. Capturing works exactly like passing an argument, environments are
+  GC-allocated so a closure can outlive its maker, and closures nest, sort, and live
+  in arrays and maps.
+- **Left-to-right evaluation**, guaranteed where C leaves the order unspecified.
 - **A standard library has started**: [std/math](std/math.kkg),
-  [std/list](std/list.kkg), [std/string](std/string.kkg).
+  [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
+  [std/string](std/string.kkg).
 
-Not yet: closures, traits, concurrency, and all tooling
+Not yet: traits, concurrency, and all tooling
 (REPL, formatter, linter, package manager). Integer overflow still wraps silently.
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
@@ -95,6 +101,13 @@ first_or(None, "default")     // default  — T = string, from the 2nd argument
 ```
 
 ```kkg
+// Closures. Types are inferred from what the function expects.
+let adults = list.filter(people, |p| p.age >= 18)
+let byName = list.sorted(adults, |a, b| a.name < b.name)
+let line   = list.join(list.map(byName, |p| p.name), ", ")
+```
+
+```kkg
 // Modules: private by default, `pub` to export. Maps and text.
 import "std/string" as str
 
@@ -110,7 +123,8 @@ fn wordCount(text: string) -> {string: int} {
 See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase2.kkg](examples/phase2.kkg),
 [examples/modules.kkg](examples/modules.kkg),
-[examples/phase5.kkg](examples/phase5.kkg), and
+[examples/phase5.kkg](examples/phase5.kkg),
+[examples/phase6.kkg](examples/phase6.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

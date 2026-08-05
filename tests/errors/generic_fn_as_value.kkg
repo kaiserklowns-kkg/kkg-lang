@@ -1,0 +1,6 @@
+import "std/list"
+fn main() {
+    let xs = [1, 2]
+    let f = list.map
+    println("${len(xs)}")
+}

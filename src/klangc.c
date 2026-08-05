@@ -88,7 +88,7 @@ typedef enum {
     TK_COMMA, TK_COLON, TK_ARROW, TK_FATARROW, TK_DOT, TK_DOTDOT, TK_QUESTION,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
-    TK_ANDAND, TK_OROR, TK_NOT
+    TK_ANDAND, TK_OROR, TK_NOT, TK_PIPE
 } TokKind;
 
 /* One chunk of a string literal. `expr` is the source text inside `${...}`,
@@ -274,6 +274,7 @@ static Token lex_next(Lexer *lx) {
         case '/': return make_tok(TK_SLASH, line);
         case '%': return make_tok(TK_PERCENT, line);
         case '!': return make_tok(TK_NOT, line);
+        case '|': return make_tok(TK_PIPE, line);
         default: fail(line, "unexpected character '%c'", c); return make_tok(TK_EOF, line);
     }
 }
@@ -323,7 +324,8 @@ static char *key_mangle(const char *key) {
 }
 /* ───────────────────────── types ───────────────────────── */
 
-typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_MAP, TY_VAR, TY_UNKNOWN } TyKind;
+typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_MAP,
+               TY_FN, TY_VAR, TY_UNKNOWN } TyKind;
 
 typedef struct Type Type;
 struct Type {
@@ -357,10 +359,22 @@ static Type *ty_map(Type *k, Type *v) {
 static Type *ty_key(const Type *t) { return VEC_PTR(&t->args, 0, Type); }
 static Type *ty_val(const Type *t) { return VEC_PTR(&t->args, 1, Type); }
 
+/* A function type keeps its parameters in args[0..n-1] and its result last. */
+static Type *ty_fn(void) { return ty_new(TY_FN); }
+static int ty_nparams(const Type *t) { return t->args.count - 1; }
+static Type *ty_param(const Type *t, int i) { return VEC_PTR(&t->args, i, Type); }
+static Type *ty_ret(const Type *t) { return VEC_PTR(&t->args, t->args.count - 1, Type); }
+
 static bool ty_eq(const Type *a, const Type *b) {
     if (a->kind != b->kind) return false;
     if (a->kind == TY_ARRAY) return ty_eq(ty_elem(a), ty_elem(b));
     if (a->kind == TY_MAP) return ty_eq(ty_key(a), ty_key(b)) && ty_eq(ty_val(a), ty_val(b));
+    if (a->kind == TY_FN) {
+        if (a->args.count != b->args.count) return false;
+        for (int i = 0; i < a->args.count; i++)
+            if (!ty_eq(VEC_PTR(&a->args, i, Type), VEC_PTR(&b->args, i, Type))) return false;
+        return true;
+    }
     if (a->kind == TY_NAMED || a->kind == TY_VAR) {
         if (strcmp(a->name, b->name) != 0) return false;
         if (a->args.count != b->args.count) return false;
@@ -388,6 +402,15 @@ static const char *ty_str(const Type *t) {
         case TY_STRING: return "string";
         case TY_UNKNOWN: return "<unknown>";
         case TY_ARRAY: snprintf(buf, 256, "[%s]", ty_str(ty_elem(t))); return buf;
+        case TY_FN: {
+            char ps[180] = "";
+            for (int i = 0; i < ty_nparams(t); i++) {
+                if (i) strncat(ps, ", ", sizeof ps - strlen(ps) - 1);
+                strncat(ps, ty_str(ty_param(t, i)), sizeof ps - strlen(ps) - 1);
+            }
+            snprintf(buf, 256, "fn(%s) -> %s", ps, ty_str(ty_ret(t)));
+            return buf;
+        }
         case TY_MAP: {
             char kb[100];
             snprintf(kb, sizeof kb, "%s", ty_str(ty_key(t)));
@@ -420,6 +443,13 @@ static void ty_mangle_into(const Type *t, SB *sb) {
             sb_append(sb, "map_"); ty_mangle_into(ty_key(t), sb);
             sb_append(sb, "_"); ty_mangle_into(ty_val(t), sb);
             return;
+        case TY_FN:
+            sb_append(sb, "fn");
+            for (int i = 0; i < ty_nparams(t); i++) {
+                sb_append(sb, "_"); ty_mangle_into(ty_param(t, i), sb);
+            }
+            sb_append(sb, "_to_"); ty_mangle_into(ty_ret(t), sb);
+            return;
         default: break;
     }
     {
@@ -439,7 +469,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT
+    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -478,6 +508,11 @@ struct Expr {
     Vec args;        /* Vec<Expr*> */
     Vec fields;      /* Vec<FieldInit> */
     Vec arms;        /* Vec<MatchArm> */
+    Vec params;      /* EX_LAMBDA: Vec<Field> */
+    Vec captures;    /* EX_LAMBDA: Vec<Field> — enclosing locals the body refers to */
+    Vec body;        /* EX_LAMBDA: Vec<Stmt*> when the body is a block */
+    bool is_block;   /* EX_LAMBDA: `|x| { ... }` rather than `|x| expr` */
+    int lam_id;      /* EX_LAMBDA/EX_FNREF: index assigned when lifting */
 };
 
 typedef enum { ST_LET, ST_ASSIGN, ST_IF, ST_WHILE, ST_FOR, ST_RETURN, ST_EXPR, ST_BLOCK } StmtKind;
@@ -510,7 +545,7 @@ typedef struct { char *name; char *key; const char *module; bool is_pub;
 typedef struct { char *name; char *key; const char *module; bool is_pub;
                  Vec type_params; Vec variants; char *mangled; } EnumDecl;
 typedef struct {
-    char *name; char *key; const char *module; bool is_pub;
+    char *name; char *key; const char *module; const char *file; bool is_pub;
     Vec type_params; Vec params; /* Vec<Field> */
     Type *ret_type; Vec body; char *mangled;
 } FnDecl;
@@ -633,6 +668,10 @@ static Expr *new_expr(ExprKind k, int line) {
     vec_init(&e->args, sizeof(Expr *));
     vec_init(&e->fields, sizeof(FieldInit));
     vec_init(&e->arms, sizeof(MatchArm));
+    vec_init(&e->params, sizeof(Field));
+    vec_init(&e->captures, sizeof(Field));
+    vec_init(&e->body, sizeof(Stmt *));
+    e->lam_id = -1;
     return e;
 }
 static Stmt *new_stmt(StmtKind k, int line) {
@@ -655,6 +694,17 @@ static Type *parse_type(Parser *p) {
         Type *v = parse_type(p);
         p_expect(p, TK_RBRACE);
         return ty_map(k, v);
+    }
+    if (p_match(p, TK_FN)) {              /* fn(int, string) -> bool */
+        Type *f = ty_fn();
+        p_expect(p, TK_LPAREN);
+        while (!p_check(p, TK_RPAREN)) {
+            VEC_PUSH_PTR(&f->args, parse_type(p));
+            if (!p_match(p, TK_COMMA)) break;
+        }
+        p_expect(p, TK_RPAREN);
+        VEC_PUSH_PTR(&f->args, p_match(p, TK_ARROW) ? parse_type(p) : ty_void());
+        return f;
     }
     Token t = p_expect(p, TK_IDENT);
     if (strcmp(t.text, "int") == 0) return ty_int();
@@ -779,6 +829,31 @@ static Expr *parse_primary(Parser *p) {
         if (tok.parts) return parse_interp(p, &tok);
         Expr *e = new_expr(EX_STRING, line);
         e->sval = tok.text;
+        return e;
+    }
+    /* `|x, y| expr` and `|x, y| { ... }`. A zero-parameter closure is written `||`,
+       which the lexer hands over as one token — an expression can never start with
+       logical-or, so reading it as an empty parameter list is unambiguous. */
+    if (p_check(p, TK_PIPE) || p_check(p, TK_OROR)) {
+        Expr *e = new_expr(EX_LAMBDA, line);
+        bool empty = p_check(p, TK_OROR);
+        p_advance(p);
+        if (!empty) {
+            while (!p_check(p, TK_PIPE)) {
+                Field *pm = vec_push(&e->params);
+                pm->is_mut = p_match(p, TK_MUT);
+                pm->name = p_expect(p, TK_IDENT).text;
+                /* The type may be omitted when the surrounding code implies it. */
+                pm->type = p_match(p, TK_COLON) ? parse_type(p) : NULL;
+                if (!p_match(p, TK_COMMA)) break;
+            }
+            p_expect(p, TK_PIPE);
+        }
+        bool saved = p->no_struct_lit;
+        p->no_struct_lit = false;
+        if (p_check(p, TK_LBRACE)) { e->is_block = true; e->body = parse_block(p); }
+        else e->lhs = parse_expr(p);
+        p->no_struct_lit = saved;
         return e;
     }
     /* `{}` and `{k: v, ...}`. Not allowed where a block could start, so an `if`
@@ -918,6 +993,21 @@ static Expr *parse_postfix(Parser *p) {
             p->no_struct_lit = saved;
             p_expect(p, TK_RBRACKET);
             e = ix;
+        } else if (p_check(p, TK_LPAREN)) {
+            /* Calling whatever an expression produced: ops["add"](3, 4), f()(). */
+            int line = p->cur.line;
+            p_advance(p);
+            bool saved = p->no_struct_lit;
+            p->no_struct_lit = false;
+            Expr *call = new_expr(EX_CALL, line);
+            call->lhs = e;
+            while (!p_check(p, TK_RPAREN)) {
+                VEC_PUSH_PTR(&call->args, parse_expr(p));
+                if (!p_match(p, TK_COMMA)) break;
+            }
+            p->no_struct_lit = saved;
+            p_expect(p, TK_RPAREN);
+            e = call;
         } else if (p_check(p, TK_QUESTION)) {
             int line = p->cur.line;
             p_advance(p);
@@ -1140,7 +1230,7 @@ static void parse_program(Parser *p) {
             p_advance(p);
             FnDecl *fd = calloc(1, sizeof(FnDecl));
             fd->name = p_expect(p, TK_IDENT).text;
-            fd->module = p->module; fd->is_pub = is_pub;
+            fd->module = p->module; fd->file = p->file; fd->is_pub = is_pub;
             fd->key = qual_key(p->module, fd->name);
             fd->type_params = parse_type_params(p);
             p->tparams = &fd->type_params;
@@ -1243,6 +1333,12 @@ static Type *subst_type(Type *t, const Vec *subst) {
         Type *k = subst_type(ty_key(t), subst), *v = subst_type(ty_val(t), subst);
         return (k == ty_key(t) && v == ty_val(t)) ? t : ty_map(k, v);
     }
+    if (t->kind == TY_FN) {
+        Type *r = ty_fn();
+        for (int i = 0; i < t->args.count; i++)
+            VEC_PUSH_PTR(&r->args, subst_type(VEC_PTR(&t->args, i, Type), subst));
+        return r;
+    }
     if (t->kind != TY_NAMED || t->args.count == 0) return t;
     Type *r = ty_named(t->name);
     for (int i = 0; i < t->args.count; i++)
@@ -1264,6 +1360,12 @@ static bool unify(Type *pat, Type *actual, Vec *subst) {
     if (pat->kind == TY_ARRAY) return unify(ty_elem(pat), ty_elem(actual), subst);
     if (pat->kind == TY_MAP)
         return unify(ty_key(pat), ty_key(actual), subst) && unify(ty_val(pat), ty_val(actual), subst);
+    if (pat->kind == TY_FN) {
+        if (pat->args.count != actual->args.count) return false;
+        for (int i = 0; i < pat->args.count; i++)
+            if (!unify(VEC_PTR(&pat->args, i, Type), VEC_PTR(&actual->args, i, Type), subst)) return false;
+        return true;
+    }
     if (pat->kind == TY_NAMED) {
         if (strcmp(pat->name, actual->name) != 0) return false;
         if (pat->args.count != actual->args.count) return false;
@@ -1287,6 +1389,15 @@ static Expr *clone_expr(Expr *e, const Vec *subst) {
     Expr *c = new_expr(e->kind, e->line);
     c->ival = e->ival; c->fval = e->fval; c->bval = e->bval;
     c->sval = e->sval; c->op = e->op; c->is_qual = e->is_qual; c->mod = e->mod;
+    c->is_block = e->is_block;
+    for (int i = 0; i < e->params.count; i++) {
+        Field *src = vec_get(&e->params, i);
+        Field *dst = vec_push(&c->params);
+        dst->name = src->name;
+        dst->is_mut = src->is_mut;
+        dst->type = src->type ? subst_type(src->type, subst) : NULL;
+    }
+    c->body = clone_stmts(&e->body, subst);
     c->lhs = clone_expr(e->lhs, subst);
     c->rhs = clone_expr(e->rhs, subst);
     for (int i = 0; i < e->args.count; i++)
@@ -1341,6 +1452,7 @@ static Vec g_mono_arrays;   /* Vec<Type*> — one entry per distinct element typ
 static Vec g_fn_queue;      /* Vec<FnDecl*> — pending typecheck */
 
 static Vec g_mono_maps;     /* Vec<Type*> — one entry per distinct (key, value) pair */
+static Vec g_mono_fntypes;  /* Vec<Type*> — one entry per distinct signature */
 
 static bool array_registered(const char *mangled) {
     for (int i = 0; i < g_mono_arrays.count; i++)
@@ -1350,6 +1462,11 @@ static bool array_registered(const char *mangled) {
 static bool map_registered(const char *mangled) {
     for (int i = 0; i < g_mono_maps.count; i++)
         if (strcmp(ty_mangle(VEC_PTR(&g_mono_maps, i, Type)), mangled) == 0) return true;
+    return false;
+}
+static bool fntype_registered(const char *mangled) {
+    for (int i = 0; i < g_mono_fntypes.count; i++)
+        if (strcmp(ty_mangle(VEC_PTR(&g_mono_fntypes, i, Type)), mangled) == 0) return true;
     return false;
 }
 
@@ -1395,6 +1512,13 @@ static void request_type(Type *t, int line) {
         char *am = ty_mangle(t);
         if (!array_registered(am)) VEC_PUSH_PTR(&g_mono_arrays, t);
         free(am);
+        return;
+    }
+    if (t->kind == TY_FN) {
+        for (int i = 0; i < t->args.count; i++) request_type(VEC_PTR(&t->args, i, Type), line);
+        char *fm = ty_mangle(t);
+        if (!fntype_registered(fm)) VEC_PUSH_PTR(&g_mono_fntypes, t);
+        free(fm);
         return;
     }
     if (t->kind == TY_MAP) {
@@ -1485,7 +1609,8 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
 
     Vec subst = make_subst(&generic->type_params, type_args, "function", key_show(generic->key), line);
     FnDecl *fd = calloc(1, sizeof(FnDecl));
-    fd->name = generic->name; fd->key = generic->key; fd->module = generic->module; fd->is_pub = generic->is_pub;
+    fd->name = generic->name; fd->key = generic->key; fd->module = generic->module;
+    fd->file = generic->file; fd->is_pub = generic->is_pub;
     fd->mangled = mangled;
     vec_init(&fd->type_params, sizeof(char *));
     vec_init(&fd->params, sizeof(Field));
@@ -1519,20 +1644,49 @@ static void scope_declare(Scope *sc, const char *name, Type *type, bool is_mut) 
     Var *v = vec_push(top);
     v->name = strdup(name); v->type = type; v->is_mut = is_mut;
 }
-static Var *scope_lookup(Scope *sc, const char *name) {
+static Var *scope_lookup_at(Scope *sc, const char *name, int *depth) {
     for (int i = sc->scopes.count - 1; i >= 0; i--) {
         Vec *scope = vec_get(&sc->scopes, i);
         for (int j = scope->count - 1; j >= 0; j--) {
             Var *v = vec_get(scope, j);
-            if (strcmp(v->name, name) == 0) return v;
+            if (strcmp(v->name, name) == 0) { if (depth) *depth = i; return v; }
         }
     }
     return NULL;
+}
+static Var *scope_lookup(Scope *sc, const char *name) { return scope_lookup_at(sc, name, NULL); }
+
+/* Closures being type-checked, innermost last. `boundary` is the scope depth the
+   closure's own parameters live at, so anything found below it is a capture. */
+typedef struct { Expr *lam; int boundary; } LamFrame;
+static Vec g_lams;
+static Vec g_fnrefs;   /* Vec<Expr*> — plain functions used as closure values */
+
+static void note_capture(Expr *lam, const char *name, Type *type, bool is_mut) {
+    for (int i = 0; i < lam->captures.count; i++)
+        if (strcmp(((Field *)vec_get(&lam->captures, i))->name, name) == 0) return;
+    Field *f = vec_push(&lam->captures);
+    f->name = strdup(name); f->type = type; f->is_mut = is_mut;
+}
+
+/* Resolve a variable, recording it as a capture in every closure that sits between
+   the use and the declaration — the inner ones need it passed through the outer. */
+static Var *lookup_capturing(Scope *sc, const char *name) {
+    int depth = 0;
+    Var *v = scope_lookup_at(sc, name, &depth);
+    if (!v) return NULL;
+    for (int i = 0; i < g_lams.count; i++) {
+        LamFrame *lf = vec_get(&g_lams, i);
+        if (lf->boundary > depth) note_capture(lf->lam, name, v->type, v->is_mut);
+    }
+    return v;
 }
 
 /* ───────────────────────── typecheck ───────────────────────── */
 
 static Type *g_cur_ret;  /* return type of the function being checked (for `?`) */
+static bool g_ret_inferring;   /* inside a block closure with no declared result */
+static Type *g_ret_found;      /* what its `return` statements settled on */
 
 static Type *tc_expr(Expr *e, Scope *sc, Type *expected);
 static void tc_block(Vec *body, Scope *sc);
@@ -1557,8 +1711,11 @@ static Type *tc_binary(Expr *e, Scope *sc) {
         return ty_bool();
     }
     if (strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
+        /* Strings order lexicographically by byte, so text can be sorted. */
+        if (lt->kind == TY_STRING && rt->kind == TY_STRING) return ty_bool();
         if (!ty_numeric(lt) || !ty_numeric(rt) || !ty_eq(lt, rt))
-            fail(e->line, "operator '%s' needs matching numeric operands, got %s and %s", op, ty_str(lt), ty_str(rt));
+            fail(e->line, "operator '%s' needs matching numeric or string operands, got %s and %s",
+                 op, ty_str(lt), ty_str(rt));
         return ty_bool();
     }
     if (strcmp(op, "+") == 0 && lt->kind == TY_STRING && rt->kind == TY_STRING) return ty_string();
@@ -1628,6 +1785,13 @@ static EnumDecl *find_enum_by_variant_quiet(const char *vname) {
 /* True when this expression cannot determine its own type — a variant like `None`
    whose payload doesn't mention every type parameter of its enum. */
 static bool needs_expected(Expr *e, Scope *sc) {
+    /* A closure with unannotated parameters can only be checked once something
+       tells it what they are, so other arguments should be resolved first. */
+    if (e->kind == EX_LAMBDA) {
+        for (int i = 0; i < e->params.count; i++)
+            if (!((Field *)vec_get(&e->params, i))->type) return true;
+        return false;
+    }
     if (e->kind != EX_CALL && e->kind != EX_IDENT) return false;
     if (e->kind == EX_IDENT && scope_lookup(sc, e->sval)) return false;
     EnumDecl *ge = find_enum_by_variant_quiet(e->sval);
@@ -1671,7 +1835,10 @@ static void tc_args(Vec *wants, Vec *args, Vec *labels, Vec *subst, Scope *sc) {
         if (pick < 0) for (int i = 0; i < n && pick < 0; i++) if (!done[i]) pick = i;
         Expr *arg = VEC_PTR(args, pick, Expr);
         Type *want = subst_type(VEC_PTR(wants, pick, Type), subst);
-        Type *got = tc_expr(arg, sc, ty_has_var(want) ? NULL : want);
+        /* A partly-resolved function type is still worth passing down: `fn(int) -> U`
+           tells a closure what its parameters are even though the result is open. */
+        bool useful = !ty_has_var(want) || want->kind == TY_FN;
+        Type *got = tc_expr(arg, sc, useful ? want : NULL);
         if (!unify(VEC_PTR(wants, pick, Type), got, subst))
             fail(arg->line, "%s: expected %s, got %s",
                  VEC_PTR(labels, pick, char), ty_str(want), ty_str(got));
@@ -1693,10 +1860,43 @@ static char *labelf(const char *fmt, ...) {
 static Var *lvalue_root(Expr *e, Scope *sc) {
     while (e->kind == EX_FIELD || e->kind == EX_INDEX) e = e->lhs;
     if (e->kind != EX_IDENT) return NULL;
-    return scope_lookup(sc, e->sval);
+    return lookup_capturing(sc, e->sval);
+}
+
+/* Calling a closure value: the callee is in e->lhs and already typed. */
+static Type *tc_indirect(Expr *e, Type *ft, Scope *sc, const char *what) {
+    if (ft->kind != TY_FN)
+        fail(e->line, "%s is %s, which is not something you can call", what, ty_str(ft));
+    if (e->args.count != ty_nparams(ft))
+        fail(e->line, "%s takes %d argument(s), got %d", what, ty_nparams(ft), e->args.count);
+    for (int i = 0; i < e->args.count; i++) {
+        Expr *a = VEC_PTR(&e->args, i, Expr);
+        Type *want = ty_param(ft, i);
+        Type *at = tc_expr(a, sc, want);
+        if (!ty_eq(at, want))
+            fail(a->line, "argument %d to %s: expected %s, got %s",
+                 i + 1, what, ty_str(want), ty_str(at));
+    }
+    return ty_ret(ft);
 }
 
 static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
+    /* The parser already produced a callee expression, as in ops["add"](3, 4). */
+    if (e->lhs) {
+        Type *ft = tc_expr(e->lhs, sc, NULL);
+        return tc_indirect(e, ft, sc, "this");
+    }
+    /* A local holding a function is called through, and shadows any builtin. */
+    if (!e->is_qual) {
+        Var *v = lookup_capturing(sc, e->sval);
+        if (v) {
+            Expr *callee = new_expr(EX_IDENT, e->line);
+            callee->sval = e->sval;
+            callee->type = v->type;
+            e->lhs = callee;               /* marks this as an indirect call */
+            return tc_indirect(e, v->type, sc, labelf("'%s'", e->sval));
+        }
+    }
     if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
         if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
         tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
@@ -1996,12 +2196,93 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
         case EX_BOOL: t = ty_bool(); break;
         case EX_STRING: t = ty_string(); break;
         case EX_IDENT: {
-            Var *v = scope_lookup(sc, e->sval);
+            Var *v = lookup_capturing(sc, e->sval);
             if (v) { t = v->type; break; }
             EnumDecl *ge = find_enum_by_variant(e->sval, e->line);
             if (ge) { t = tc_variant(e, sc, expected, ge); break; }
+            /* A plain function name used as a value becomes a closure with no
+               captures, so `map(xs, double)` works without wrapping it in `|x| ...`. */
+            FnDecl *fn = e->is_qual ? find_fn(e->sval)
+                                    : find_fn(qual_key(e->mod ? e->mod : g_cur_module, e->sval));
+            if (fn) {
+                if (fn->type_params.count != 0)
+                    fail(e->line, "'%s' is generic, so it cannot be used as a value here — "
+                                  "wrap it, as in '|x| %s(x)'", key_show(fn->key), key_show(fn->key));
+                Type *ft = ty_fn();
+                for (int i = 0; i < fn->params.count; i++)
+                    VEC_PUSH_PTR(&ft->args, ((Field *)vec_get(&fn->params, i))->type);
+                VEC_PUSH_PTR(&ft->args, fn->ret_type);
+                Vec none; vec_init(&none, sizeof(Type *));
+                e->kind = EX_FNREF;
+                e->resolved = request_fn(fn, &none, e->line);
+                e->type = ft;
+                VEC_PUSH_PTR(&g_fnrefs, e);
+                t = ft;
+                break;
+            }
             fail(e->line, "undefined variable '%s'", e->sval);
             return NULL;
+        }
+        case EX_LAMBDA: {
+            Type *want = expected && expected->kind == TY_FN &&
+                         ty_nparams(expected) == e->params.count ? expected : NULL;
+            for (int i = 0; i < e->params.count; i++) {
+                Field *pm = vec_get(&e->params, i);
+                if (pm->type) continue;
+                if (!want || ty_has_var(ty_param(want, i)))
+                    fail(e->line, "cannot tell what type '%s' is — annotate it, as in "
+                                  "'|%s: int| ...'", pm->name, pm->name);
+                pm->type = ty_param(want, i);
+            }
+            /* The result may still be an open type variable; infer it from the body. */
+            if (want && ty_has_var(ty_ret(want))) want = NULL;
+            scope_push(sc);
+            int boundary = sc->scopes.count - 1;
+            for (int i = 0; i < e->params.count; i++) {
+                Field *pm = vec_get(&e->params, i);
+                request_type(pm->type, e->line);
+                scope_declare(sc, pm->name, pm->type, pm->is_mut);
+            }
+            LamFrame *lf = vec_push(&g_lams);
+            lf->lam = e; lf->boundary = boundary;
+
+            Type *saved_ret = g_cur_ret;
+            bool saved_inferring = g_ret_inferring;
+            Type *saved_found = g_ret_found;
+            Type *ret;
+            if (e->is_block && want) {
+                ret = ty_ret(want);
+                g_cur_ret = ret;
+                g_ret_inferring = false;
+                tc_block(&e->body, sc);
+            } else if (e->is_block) {
+                /* No expected type, so take the result from what the body returns. */
+                g_cur_ret = ty_void();
+                g_ret_inferring = true;
+                g_ret_found = NULL;
+                tc_block(&e->body, sc);
+                ret = g_ret_found ? g_ret_found : ty_void();
+            } else {
+                g_ret_inferring = false;
+                g_cur_ret = want ? ty_ret(want) : NULL;
+                Type *bt = tc_expr(e->lhs, sc, want ? ty_ret(want) : NULL);
+                ret = want ? ty_ret(want) : bt;
+                if (want && !ty_eq(bt, ret))
+                    fail(e->line, "this closure must return %s but its body gives %s",
+                         ty_str(ret), ty_str(bt));
+            }
+            g_cur_ret = saved_ret;
+            g_ret_inferring = saved_inferring;
+            g_ret_found = saved_found;
+            g_lams.count--;
+            scope_pop(sc);
+
+            Type *ft = ty_fn();
+            for (int i = 0; i < e->params.count; i++)
+                VEC_PUSH_PTR(&ft->args, ((Field *)vec_get(&e->params, i))->type);
+            VEC_PUSH_PTR(&ft->args, ret);
+            t = ft;
+            break;
         }
         case EX_UNARY: {
             Type *inner = tc_expr(e->lhs, sc, NULL);
@@ -2103,7 +2384,8 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
         }
         default: t = ty_unknown(); break;
     }
-    if (t->kind == TY_NAMED || t->kind == TY_ARRAY || t->kind == TY_MAP) request_type(t, e->line);
+    if (t->kind == TY_NAMED || t->kind == TY_ARRAY || t->kind == TY_MAP || t->kind == TY_FN)
+        request_type(t, e->line);
     e->type = t;
     return t;
 }
@@ -2177,6 +2459,16 @@ static void tc_stmt(Stmt *s, Scope *sc) {
             break;
         }
         case ST_RETURN:
+            if (g_ret_inferring) {
+                if (s->expr) {
+                    Type *rt = tc_expr(s->expr, sc, g_ret_found);
+                    if (!g_ret_found) g_ret_found = rt;
+                    else if (!ty_eq(rt, g_ret_found))
+                        fail(s->line, "this closure returns %s here but %s elsewhere — "
+                                      "every 'return' must agree", ty_str(rt), ty_str(g_ret_found));
+                }
+                break;
+            }
             if (s->expr) {
                 if (g_cur_ret->kind == TY_VOID) fail(s->line, "this function returns nothing, but 'return' has a value");
                 Type *rt = tc_expr(s->expr, sc, g_cur_ret);
@@ -2205,6 +2497,7 @@ static void tc_fn(FnDecl *fd) {
     }
     g_cur_ret = fd->ret_type;
     g_cur_module = fd->module ? fd->module : MOD_ROOT;
+    if (fd->file) g_filename = fd->file;   /* so errors name the right file */
     tc_block(&fd->body, &sc);
     scope_pop(&sc);
 }
@@ -2276,7 +2569,7 @@ static const char *c_type(const Type *t) {
         case TY_FLOAT: return "double";
         case TY_BOOL: return "bool";
         case TY_STRING: return "char*";
-        case TY_NAMED: case TY_ARRAY: case TY_MAP: return ty_mangle(t);
+        case TY_NAMED: case TY_ARRAY: case TY_MAP: case TY_FN: return ty_mangle(t);
         default: return "void*";
     }
 }
@@ -2289,6 +2582,31 @@ static void indent_to(SB *sb, int n) { for (int i = 0; i < n; i++) sb_append(sb,
 
 static void cg_expr(Expr *e, SB *out, SB *pre, int ind);
 static void cg_stmts(Vec *body, SB *sb, int ind);
+
+/* C leaves the order of evaluation between operands unspecified, but Klang
+   promises left to right. Anything that could observe the difference — a call —
+   forces earlier operands into temporaries so they run first. */
+static bool has_call(Expr *e) {
+    if (!e) return false;
+    if (e->kind == EX_CALL || e->kind == EX_MATCH || e->kind == EX_TRY) return true;
+    if (has_call(e->lhs) || has_call(e->rhs)) return true;
+    for (int i = 0; i < e->args.count; i++) if (has_call(VEC_PTR(&e->args, i, Expr))) return true;
+    for (int i = 0; i < e->fields.count; i++)
+        if (has_call(((FieldInit *)vec_get(&e->fields, i))->value)) return true;
+    return false;
+}
+
+/* Emit an operand, optionally pinning it to a temporary so its side effects
+   happen before whatever is emitted next. */
+static void cg_operand(Expr *e, SB *out, SB *pre, int ind, bool pin) {
+    if (!pin || e->type->kind == TY_VOID) { cg_expr(e, out, pre, ind); return; }
+    SB val; sb_init(&val);
+    cg_expr(e, &val, pre, ind);
+    char *tmp = fresh_tmp();
+    indent_to(pre, ind);
+    sb_appendf(pre, "%s %s = %s;\n", c_type(e->type), tmp, val.data);
+    sb_append(out, tmp);
+}
 
 /* Emit a variant constructor value: (Option_int){ .tag = ..., .data.Some._0 = ... } */
 static void cg_variant_value(const Type *enum_ty, const char *variant, Vec *arg_exprs,
@@ -2413,30 +2731,49 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             sb_append(out, ")");
             break;
         case EX_BINARY:
-            if (strcmp(e->op, "+") == 0 && e->lhs->type->kind == TY_STRING) {
-                sb_append(out, "klang_str_concat(");
-                cg_expr(e->lhs, out, pre, ind);
-                sb_append(out, ", ");
+            /* && and || must not evaluate their right side unless they have to,
+               and the right side may need statements, so lower them to an if. */
+            if ((strcmp(e->op, "&&") == 0 || strcmp(e->op, "||") == 0) && has_call(e->rhs)) {
+                bool is_and = strcmp(e->op, "&&") == 0;
+                SB lv; sb_init(&lv);
+                cg_expr(e->lhs, &lv, pre, ind);
+                char *tmp = fresh_tmp();
+                indent_to(pre, ind);
+                sb_appendf(pre, "bool %s = %s;\n", tmp, lv.data);
+                indent_to(pre, ind);
+                sb_appendf(pre, "if (%s%s) {\n", is_and ? "" : "!", tmp);
+                SB rv; sb_init(&rv);
+                SB rpre; sb_init(&rpre);
+                cg_expr(e->rhs, &rv, &rpre, ind + 1);
+                sb_append(pre, rpre.data);
+                indent_to(pre, ind + 1);
+                sb_appendf(pre, "%s = %s;\n", tmp, rv.data);
+                indent_to(pre, ind);
+                sb_append(pre, "}\n");
+                sb_append(out, tmp);
+                break;
+            }
+            {
+                /* Left before right, whatever order C would have picked. */
+                bool pin = has_call(e->rhs);
+                bool str = e->lhs->type->kind == TY_STRING;
+                const char *op = e->op;
+                if (str && strcmp(op, "+") == 0) sb_append(out, "klang_str_concat(");
+                else if (str && strcmp(op, "==") == 0) sb_append(out, "klang_str_eq(");
+                else if (str && strcmp(op, "!=") == 0) sb_append(out, "(!klang_str_eq(");
+                else if (str) sb_append(out, "(strcmp(");
+                else sb_append(out, "(");
+
+                cg_operand(e->lhs, out, pre, ind, pin);
+                if (str) sb_append(out, ", ");
+                else sb_appendf(out, " %s ", op);
                 cg_expr(e->rhs, out, pre, ind);
-                sb_append(out, ")");
-            } else if (strcmp(e->op, "==") == 0 && e->lhs->type->kind == TY_STRING) {
-                sb_append(out, "klang_str_eq(");
-                cg_expr(e->lhs, out, pre, ind);
-                sb_append(out, ", ");
-                cg_expr(e->rhs, out, pre, ind);
-                sb_append(out, ")");
-            } else if (strcmp(e->op, "!=") == 0 && e->lhs->type->kind == TY_STRING) {
-                sb_append(out, "(!klang_str_eq(");
-                cg_expr(e->lhs, out, pre, ind);
-                sb_append(out, ", ");
-                cg_expr(e->rhs, out, pre, ind);
-                sb_append(out, "))");
-            } else {
-                sb_append(out, "(");
-                cg_expr(e->lhs, out, pre, ind);
-                sb_appendf(out, " %s ", e->op);
-                cg_expr(e->rhs, out, pre, ind);
-                sb_append(out, ")");
+
+                if (str && strcmp(op, "+") == 0) sb_append(out, ")");
+                else if (str && strcmp(op, "==") == 0) sb_append(out, ")");
+                else if (str && strcmp(op, "!=") == 0) sb_append(out, "))");
+                else if (str) sb_appendf(out, ") %s 0)", op);
+                else sb_append(out, ")");
             }
             break;
         case EX_FIELD:
@@ -2485,6 +2822,27 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             sb_append(out, "))");
             break;
         }
+        case EX_LAMBDA: {
+            /* Allocate the environment, copy the captures in, hand back { fn, env }. */
+            char *env = fresh_tmp();
+            indent_to(pre, ind);
+            if (e->captures.count > 0) {
+                sb_appendf(pre, "_klam%d_env *%s = klang_gc_alloc(sizeof(_klam%d_env));\n",
+                           e->lam_id, env, e->lam_id);
+                for (int i = 0; i < e->captures.count; i++) {
+                    Field *c = vec_get(&e->captures, i);
+                    indent_to(pre, ind);
+                    sb_appendf(pre, "%s->%s = %s;\n", env, c->name, c->name);
+                }
+            } else {
+                sb_appendf(pre, "void *%s = NULL;\n", env);
+            }
+            sb_appendf(out, "(%s){ .fn = _klam%d, .env = %s }", ty_mangle(e->type), e->lam_id, env);
+            break;
+        }
+        case EX_FNREF:
+            sb_appendf(out, "(%s){ .fn = _kref_%s, .env = NULL }", ty_mangle(e->type), e->resolved);
+            break;
         case EX_MAP_LIT: {
             char *m = ty_mangle(e->type);
             char *tmp = fresh_tmp();
@@ -2503,6 +2861,20 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
         }
         case EX_TRY: cg_try(e, out, pre, ind); break;
         case EX_CALL: {
+            if (e->lhs) {          /* indirect: call through a closure value */
+                SB cb; sb_init(&cb);
+                cg_expr(e->lhs, &cb, pre, ind);
+                char *cv = fresh_tmp();
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s %s = %s;\n", c_type(e->lhs->type), cv, cb.data);
+                sb_appendf(out, "%s.fn(%s.env", cv, cv);
+                for (int i = 0; i < e->args.count; i++) {
+                    sb_append(out, ", ");
+                    cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
+                }
+                sb_append(out, ")");
+                break;
+            }
             if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
                 Expr *arg = VEC_PTR(&e->args, 0, Expr);
                 const char *fmt;
@@ -2617,7 +2989,10 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             sb_appendf(out, "%s(", e->resolved ? e->resolved : e->sval);
             for (int i = 0; i < e->args.count; i++) {
                 if (i) sb_append(out, ", ");
-                cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
+                bool pin = false;
+                for (int j = i + 1; j < e->args.count && !pin; j++)
+                    pin = has_call(VEC_PTR(&e->args, j, Expr));
+                cg_operand(VEC_PTR(&e->args, i, Expr), out, pre, ind, pin);
             }
             sb_append(out, ")");
             break;
@@ -3022,6 +3397,16 @@ static void emit_array(const Type *t, SB *sb) {
                    "    a->data[a->len++] = v;\n}\n\n", m, m, e, e, e);
 }
 
+/* A closure is a code pointer plus an environment pointer, passed by value. The
+   environment is GC-allocated, so the collector traces whatever was captured
+   without needing to be told anything about it. */
+static void emit_fntype(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "typedef struct %s { %s (*fn)(void *", m, c_type(ty_ret(t)));
+    for (int i = 0; i < ty_nparams(t); i++) sb_appendf(sb, ", %s", c_type(ty_param(t, i)));
+    sb_appendf(sb, "); void *env; } %s;\n\n", m);
+}
+
 /* Open-addressed hash map with linear probing and tombstones. One is emitted per
    distinct (key, value) pair, so lookups compare and hash concrete types with no
    indirection through function pointers. */
@@ -3097,7 +3482,7 @@ static void emit_map(const Type *t, SB *sb) {
 
 /* Collect the mangled names of named types a mono type embeds by value. */
 static void collect_deps(const Type *t, Vec *out) {
-    if (t->kind != TY_NAMED && t->kind != TY_ARRAY && t->kind != TY_MAP) return;
+    if (t->kind != TY_NAMED && t->kind != TY_ARRAY && t->kind != TY_MAP && t->kind != TY_FN) return;
     VEC_PUSH_PTR(out, ty_mangle(t));
 }
 
@@ -3140,8 +3525,8 @@ static void emit_enum(EnumDecl *ed, SB *sb) {
 /* Types embed each other by value, so emit them in dependency order. */
 static void emit_types(SB *sb) {
     int n_s = g_mono_structs.count, n_e = g_mono_enums.count;
-    int n_a = g_mono_arrays.count, n_m = g_mono_maps.count;
-    int total = n_s + n_e + n_a + n_m;
+    int n_a = g_mono_arrays.count, n_m = g_mono_maps.count, n_f = g_mono_fntypes.count;
+    int total = n_s + n_e + n_a + n_m + n_f;
     bool *done = calloc((size_t)total, sizeof(bool));
     Vec emitted; vec_init(&emitted, sizeof(char *));
 
@@ -3153,10 +3538,12 @@ static void emit_types(SB *sb) {
             EnumDecl *ed = (!sd && i < n_s + n_e) ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl) : NULL;
             Type *at = (!sd && !ed && i < n_s + n_e + n_a)
                      ? VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type) : NULL;
-            Type *mt = (!sd && !ed && !at)
+            Type *mt = (!sd && !ed && !at && i < n_s + n_e + n_a + n_m)
                      ? VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type) : NULL;
+            Type *ft = (!sd && !ed && !at && !mt)
+                     ? VEC_PTR(&g_mono_fntypes, i - n_s - n_e - n_a - n_m, Type) : NULL;
             const char *mangled = sd ? sd->mangled : ed ? ed->mangled
-                                : ty_mangle(at ? at : mt);
+                                : ty_mangle(at ? at : mt ? mt : ft);
 
             Vec deps; vec_init(&deps, sizeof(char *));
             if (sd) {
@@ -3171,12 +3558,16 @@ static void emit_types(SB *sb) {
             } else if (at) {
                 /* An array stores its elements inline, so the element type must be complete. */
                 collect_deps(ty_elem(at), &deps);
-            } else {
+            } else if (mt) {
                 /* A map stores keys and values inline, and hands back arrays of both. */
                 collect_deps(ty_key(mt), &deps);
                 collect_deps(ty_val(mt), &deps);
                 collect_deps(ty_array(ty_key(mt)), &deps);
                 collect_deps(ty_array(ty_val(mt)), &deps);
+            } else {
+                /* A closure typedef only mentions its parameter and result types. */
+                for (int j = 0; j < ft->args.count; j++)
+                    collect_deps(VEC_PTR(&ft->args, j, Type), &deps);
             }
             bool ready = true;
             for (int j = 0; j < deps.count && ready; j++) {
@@ -3195,7 +3586,8 @@ static void emit_types(SB *sb) {
             if (sd) emit_struct(sd, sb);
             else if (ed) emit_enum(ed, sb);
             else if (at) emit_array(at, sb);
-            else emit_map(mt, sb);
+            else if (mt) emit_map(mt, sb);
+            else emit_fntype(ft, sb);
             VEC_PUSH_PTR(&emitted, (char *)mangled);
             done[i] = true;
             progress = true;
@@ -3208,15 +3600,110 @@ static void emit_types(SB *sb) {
                       : i < n_s + n_e ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl)->mangled
                       : i < n_s + n_e + n_a
                           ? ty_mangle(VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type))
-                          : ty_mangle(VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type));
+                      : i < n_s + n_e + n_a + n_m
+                          ? ty_mangle(VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type))
+                          : ty_mangle(VEC_PTR(&g_mono_fntypes, i - n_s - n_e - n_a - n_m, Type));
         fail(0, "type '%s' is part of a cycle — recursive types need indirection, "
                 "which Klang does not have yet", m);
     }
     free(done);
 }
 
+/* ── lambda lifting ───────────────────────────────────────────────────────
+ * Every closure literal becomes a top-level C function plus a GC-allocated
+ * environment struct holding its captures. Collecting them up front means the
+ * environments and forward declarations can be emitted before any body needs them.
+ */
+static Vec g_lifted;   /* Vec<Expr*> — every EX_LAMBDA, in emission order */
+
+static void lift_stmts(Vec *body);
+
+static void lift_expr(Expr *e) {
+    if (!e) return;
+    lift_expr(e->lhs);
+    lift_expr(e->rhs);
+    for (int i = 0; i < e->args.count; i++) lift_expr(VEC_PTR(&e->args, i, Expr));
+    for (int i = 0; i < e->fields.count; i++)
+        lift_expr(((FieldInit *)vec_get(&e->fields, i))->value);
+    for (int i = 0; i < e->arms.count; i++) {
+        MatchArm *arm = vec_get(&e->arms, i);
+        lift_expr(arm->value);
+        lift_stmts(&arm->body);
+    }
+    if (e->kind == EX_LAMBDA) {
+        lift_stmts(&e->body);
+        e->lam_id = g_lifted.count;
+        VEC_PUSH_PTR(&g_lifted, e);
+    }
+}
+
+static void lift_stmts(Vec *body) {
+    for (int i = 0; i < body->count; i++) {
+        Stmt *s = VEC_PTR(body, i, Stmt);
+        lift_expr(s->expr);
+        lift_expr(s->expr2);
+        lift_expr(s->target);
+        for (int j = 0; j < s->cond_blocks.count; j++) {
+            CondBlock *cb = vec_get(&s->cond_blocks, j);
+            lift_expr(cb->cond);
+            lift_stmts(&cb->body);
+        }
+        lift_stmts(&s->body);
+    }
+}
+
+static void lambda_signature(Expr *lam, SB *sb) {
+    Type *ft = lam->type;
+    sb_appendf(sb, "%s _klam%d(void *_kenvp", c_type(ty_ret(ft)), lam->lam_id);
+    for (int i = 0; i < lam->params.count; i++) {
+        Field *pm = vec_get(&lam->params, i);
+        sb_appendf(sb, ", %s %s", c_type(pm->type), pm->name);
+    }
+    sb_append(sb, ")");
+}
+
+static void emit_lambda_env(Expr *lam, SB *sb) {
+    sb_appendf(sb, "typedef struct _klam%d_env {\n", lam->lam_id);
+    for (int i = 0; i < lam->captures.count; i++) {
+        Field *c = vec_get(&lam->captures, i);
+        sb_appendf(sb, "    %s %s;\n", c_type(c->type), c->name);
+    }
+    if (lam->captures.count == 0) sb_append(sb, "    char _empty;\n");
+    sb_appendf(sb, "} _klam%d_env;\n", lam->lam_id);
+}
+
+static void emit_lambda_body(Expr *lam, SB *sb) {
+    Type *saved = g_cg_ret;
+    g_cg_ret = ty_ret(lam->type);
+    lambda_signature(lam, sb);
+    sb_append(sb, " {\n");
+    if (lam->captures.count > 0) {
+        sb_appendf(sb, "    _klam%d_env *_kenv = _kenvp;\n", lam->lam_id);
+        /* Captures are copies, exactly as if they had been passed as arguments. */
+        for (int i = 0; i < lam->captures.count; i++) {
+            Field *c = vec_get(&lam->captures, i);
+            sb_appendf(sb, "    %s %s = _kenv->%s; (void)%s;\n",
+                       c_type(c->type), c->name, c->name, c->name);
+        }
+    } else {
+        sb_append(sb, "    (void)_kenvp;\n");
+    }
+    if (lam->is_block) {
+        cg_stmts(&lam->body, sb, 1);
+    } else {
+        SB pre; sb_init(&pre);
+        SB val; sb_init(&val);
+        cg_expr(lam->lhs, &val, &pre, 1);
+        sb_append(sb, pre.data);
+        if (ty_ret(lam->type)->kind == TY_VOID) sb_appendf(sb, "    (void)(%s);\n", val.data);
+        else sb_appendf(sb, "    return %s;\n", val.data);
+    }
+    sb_append(sb, "}\n\n");
+    g_cg_ret = saved;
+}
+
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.6 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.7 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n\n");
@@ -3225,6 +3712,21 @@ static void codegen(SB *sb) {
     sb_append(sb, "\n");
 
     emit_types(sb);
+
+    /* Closures are lifted before anything is written, so their environments and
+       declarations precede every body that builds or calls one. */
+    vec_init(&g_lifted, sizeof(Expr *));
+    for (int i = 0; i < g_mono_fns.count; i++)
+        lift_stmts(&VEC_PTR(&g_mono_fns, i, FnDecl)->body);
+    for (int i = 0; i < g_lifted.count; i++)
+        emit_lambda_env(VEC_PTR(&g_lifted, i, Expr), sb);
+    if (g_lifted.count) sb_append(sb, "\n");
+
+    for (int i = 0; i < g_lifted.count; i++) {
+        lambda_signature(VEC_PTR(&g_lifted, i, Expr), sb);
+        sb_append(sb, ";\n");
+    }
+    if (g_lifted.count) sb_append(sb, "\n");
 
     for (int i = 0; i < g_mono_fns.count; i++) {
         FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
@@ -3239,6 +3741,31 @@ static void codegen(SB *sb) {
         sb_append(sb, ");\n");
     }
     sb_append(sb, "\n");
+
+    /* A plain function used as a value needs a wrapper taking the closure calling
+       convention, since it has no environment of its own. */
+    Vec refs; vec_init(&refs, sizeof(char *));
+    for (int i = 0; i < g_fnrefs.count; i++) {
+        Expr *r = VEC_PTR(&g_fnrefs, i, Expr);
+        bool seen = false;
+        for (int j = 0; j < refs.count; j++)
+            if (strcmp(VEC_PTR(&refs, j, char), r->resolved) == 0) { seen = true; break; }
+        if (seen) continue;
+        VEC_PUSH_PTR(&refs, r->resolved);
+        Type *ft = r->type;
+        sb_appendf(sb, "%s _kref_%s(void *_kenvp", c_type(ty_ret(ft)), r->resolved);
+        for (int j = 0; j < ty_nparams(ft); j++)
+            sb_appendf(sb, ", %s _a%d", c_type(ty_param(ft, j)), j);
+        sb_append(sb, ") {\n    (void)_kenvp;\n    ");
+        if (ty_ret(ft)->kind != TY_VOID) sb_append(sb, "return ");
+        sb_appendf(sb, "%s(", r->resolved);
+        for (int j = 0; j < ty_nparams(ft); j++) sb_appendf(sb, "%s_a%d", j ? ", " : "", j);
+        sb_append(sb, ");\n}\n");
+    }
+    if (refs.count) sb_append(sb, "\n");
+
+    for (int i = 0; i < g_lifted.count; i++)
+        emit_lambda_body(VEC_PTR(&g_lifted, i, Expr), sb);
 
     for (int i = 0; i < g_mono_fns.count; i++) {
         FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
@@ -3396,7 +3923,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.6)\n\n"
+        printf("klangc — Klang compiler (0.7)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -3404,7 +3931,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.6.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.7.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -3416,6 +3943,9 @@ int main(int argc, char **argv) {
     vec_init(&g_mono_fns, sizeof(FnDecl *));
     vec_init(&g_mono_arrays, sizeof(Type *));
     vec_init(&g_mono_maps, sizeof(Type *));
+    vec_init(&g_mono_fntypes, sizeof(Type *));
+    vec_init(&g_lams, sizeof(LamFrame));
+    vec_init(&g_fnrefs, sizeof(Expr *));
     vec_init(&g_fn_queue, sizeof(FnDecl *));
     vec_init(&g_xrefs, sizeof(XRef));
     vec_init(&g_loaded, sizeof(char *));

@@ -68,6 +68,99 @@ pub fn at<T>(xs: [T], i: int) -> Result<T, string> {
     return Ok(xs[i])
 }
 
+// ── higher-order helpers ──────────────────────────────────────────────
+// Each is generic and takes a closure, so the element type and the function
+// type are both chosen at the call site and monomorphized there.
+
+pub fn map<T, U>(xs: [T], f: fn(T) -> U) -> [U] {
+    let mut out: [U] = []
+    for x in xs {
+        push(out, f(x))
+    }
+    return out
+}
+
+pub fn filter<T>(xs: [T], keep: fn(T) -> bool) -> [T] {
+    let mut out: [T] = []
+    for x in xs {
+        if keep(x) {
+            push(out, x)
+        }
+    }
+    return out
+}
+
+pub fn reduce<T, A>(xs: [T], start: A, step: fn(A, T) -> A) -> A {
+    let mut acc = start
+    for x in xs {
+        acc = step(acc, x)
+    }
+    return acc
+}
+
+pub fn find<T>(xs: [T], pred: fn(T) -> bool) -> Option<T> {
+    for x in xs {
+        if pred(x) {
+            return Some(x)
+        }
+    }
+    return None
+}
+
+pub fn any<T>(xs: [T], pred: fn(T) -> bool) -> bool {
+    for x in xs {
+        if pred(x) {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn all<T>(xs: [T], pred: fn(T) -> bool) -> bool {
+    for x in xs {
+        if !pred(x) {
+            return false
+        }
+    }
+    return true
+}
+
+pub fn count<T>(xs: [T], pred: fn(T) -> bool) -> int {
+    let mut n = 0
+    for x in xs {
+        if pred(x) {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+pub fn each<T>(xs: [T], visit: fn(T)) {
+    for x in xs {
+        visit(x)
+    }
+}
+
+// Insertion sort: stable, and short enough to be obviously correct.
+pub fn sorted<T>(xs: [T], less: fn(T, T) -> bool) -> [T] {
+    let mut out: [T] = []
+    for x in xs {
+        push(out, x)
+    }
+    let mut i = 1
+    while i < len(out) {
+        let cur = out[i]
+        let mut j = i
+        while j > 0 && less(cur, out[j - 1]) {
+            out[j] = out[j - 1]
+            j = j - 1
+        }
+        out[j] = cur
+        i = i + 1
+    }
+    return out
+}
+
 pub fn join(parts: [string], sep: string) -> string {
     let mut out = ""
     for i in 0..len(parts) {

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.6)
+# Klang Language Spec (v0.7)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -212,6 +212,50 @@ fn restock(mut items: [Item], name: string) {
 }
 ```
 
+### Closures
+
+`fn(A, B) -> R` is a function type, and `|a, b| ...` is a closure. The body is either
+one expression or a block. Parameter types can be left out whenever the surrounding
+code already implies them.
+
+```kkg
+let inc = |x: int| x + 1
+let sum = list.reduce(nums, 0, |acc, n| acc + n)   // types come from reduce
+let log = |msg: string| { println("[app] ${msg}") }
+```
+
+A plain function can be used wherever a closure is expected, so `list.map(xs, double)`
+works without wrapping.
+
+**Capturing works exactly like passing an argument.** A closure takes a copy of what it
+mentions from the enclosing scope, with the same mutability that variable had. So an
+`int` is captured by value, and an array or map — being a reference — is captured as
+that reference, which means changes through it are visible outside:
+
+```kkg
+let n = 10
+let addN = |x: int| x + n        // n copied
+
+let mut log: [string] = []
+let record = |m: string| { push(log, m) }   // log is a reference; the caller sees pushes
+```
+
+There is one rule to learn, not two, and nothing can dangle: environments are
+heap-allocated and collected, so a closure may outlive the call that created it.
+
+```kkg
+fn makeCounter(start: int) -> fn() -> int {
+    let mut cell = [start]
+    return || { cell[0] = cell[0] + 1; return cell[0] }
+}
+```
+
+Closures nest, and an inner one may capture through an outer one. They can be stored in
+arrays and maps like any other value.
+
+**Evaluation is left to right.** C leaves the order between operands unspecified; Klang
+does not, so `"${next()} ${next()}"` and `f(g(), h())` run in the order they are written.
+
 ### Generics
 
 Generic functions, structs, and enums are monomorphized: every concrete instantiation
@@ -340,7 +384,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.6, Phase 5 complete)
+## Implemented today (v0.7, Phase 6 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -373,6 +417,19 @@ let received = ch.receive()
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 6 additions**
+- **Closures**: `fn(A) -> R` types and `|a, b| ...` literals, block or expression bodied
+- Parameter types inferred from the surrounding context; result inferred from the body
+- **Capture by value, with the same mutability the variable had** — the same rule as
+  passing an argument, so references stay shared and nothing can dangle
+- Environments are GC-allocated, so a closure may outlive the call that built it
+- Nested closures capture through the closures between them
+- Plain functions usable as closure values; closures storable in arrays and maps
+- Calling the result of any expression: `ops["add"](3, 4)`
+- **Left-to-right evaluation order**, guaranteed where C leaves it unspecified
+- `<` `<=` `>` `>=` on strings, so text can be sorted
+- `std/list` gains map, filter, reduce, find, any, all, count, each, sorted
+
 **Phase 5 additions**
 - **Maps** `{K: V}` — literals, indexing, insert-on-assign, `has`, `remove`, `keys`, `values`
 - `get(m, k)` returns `Option<V>`; reading a missing key aborts, as an array index does
@@ -401,7 +458,7 @@ Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
-- Closures, traits
+- Traits
 - Integer overflow still wraps silently rather than trapping
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)

@@ -1,0 +1,103 @@
+// Phase 6: closures.
+
+import "std/list"
+import "std/string" as str
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+fn double(n: int) -> int {
+    return n * 2
+}
+
+// Returning a closure: `n` is captured and outlives the call that made it.
+fn makeCounter(start: int) -> fn() -> int {
+    let mut cell = [start]
+    return || {
+        cell[0] = cell[0] + 1
+        return cell[0]
+    }
+}
+
+fn main() {
+    let nums = [5, 2, 8, 1, 9, 3]
+
+    // map / filter / reduce, generic over both the element and the result.
+    let doubled = list.map(nums, |n| n * 2)
+    println("doubled  = ${list.join(list.map(doubled, |n| "${n}"), ", ")}")
+
+    let odds = list.filter(nums, |n| n % 2 == 1)
+    println("odds     = ${len(odds)} of ${len(nums)}")
+
+    let total = list.reduce(nums, 0, |acc, n| acc + n)
+    println("sum      = ${total}")
+
+    // The result type can differ from the element type.
+    let names = list.map(nums, |n| "n${n}")
+    println("names    = ${list.join(names, " ")}")
+
+    // A plain function can be passed where a closure is expected.
+    let viaFn = list.map([1, 2, 3], double)
+    println("via fn   = ${list.join(list.map(viaFn, |n| "${n}"), ",")}")
+
+    // Predicates.
+    println("any > 8  = ${list.any(nums, |n| n > 8)}")
+    println("all > 0  = ${list.all(nums, |n| n > 0)}")
+    println("count ev = ${list.count(nums, |n| n % 2 == 0)}")
+
+    match list.find(nums, |n| n > 4) {
+        Some(v) => println("first >4 = ${v}"),
+        None    => println("first >4 = none"),
+    }
+
+    // Sorting with a comparator, on a struct.
+    let people = [
+        Person { name: "grace", age: 45 },
+        Person { name: "ada", age: 36 },
+        Person { name: "alan", age: 41 },
+    ]
+    let byAge = list.sorted(people, |a, b| a.age < b.age)
+    println("by age   = ${list.join(list.map(byAge, |p| "${p.name}(${p.age})"), " ")}")
+
+    let byName = list.sorted(people, |a, b| a.name < b.name)
+    println("by name  = ${list.join(list.map(byName, |p| p.name), " ")}")
+
+    // Capturing the surrounding scope.
+    let threshold = 4
+    let big = list.filter(nums, |n| n > threshold)
+    println("> ${threshold}      = ${len(big)} items")
+
+    let prefix = "item-"
+    println("prefixed = ${list.join(list.map([1, 2], |n| prefix + "${n}"), " ")}")
+
+    // A closure that outlives the function that built it.
+    let next = makeCounter(10)
+    println("counter  = ${next()} ${next()} ${next()}")
+
+    // Closures held in a data structure.
+    let ops: {string: fn(int, int) -> int} = {
+        "add": |a, b| a + b,
+        "mul": |a, b| a * b,
+    }
+    println("add(3,4) = ${ops["add"](3, 4)}")
+    println("mul(3,4) = ${ops["mul"](3, 4)}")
+
+    // Composing closures.
+    let compose = |f: fn(int) -> int, g: fn(int) -> int| {
+        return |x: int| f(g(x))
+    }
+    let addThenDouble = compose(|x| x * 2, |x| x + 3)
+    println("compose  = ${addThenDouble(5)}")
+
+    // Words, using the text module and closures together.
+    let words = str.split("the quick brown fox jumps", " ")
+    let longWords = list.filter(words, |w| len(w) > 3)
+    let upper = list.map(longWords, |w| str.toUpper(w))
+    println("long     = ${list.join(upper, " ")}")
+
+    assert(total == 28, "reduce must sum correctly")
+    assert(len(odds) == 4, "filter must keep the odd numbers")
+    println("phase6: ok")
+}
