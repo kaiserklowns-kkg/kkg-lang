@@ -3180,6 +3180,50 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind);
 static void cg_stmts(Vec *body, SB *sb, int ind);
 static void copy_expr(const Type *t, const char *val, SB *out);
 
+/* Does a value of this type contain anything the collector owns? Only such
+   values need a root slot; an int or a bool never does. String literals live in
+   .rodata rather than the heap, but rooting one is harmless — the collector
+   ignores an address that is not one of its objects. */
+static bool type_has_gc(const Type *t) {
+    switch (t->kind) {
+        case TY_STRING: case TY_ARRAY: case TY_MAP: case TY_FN: case TY_TASK:
+            return true;
+        case TY_NAMED: {
+            StructDecl *sd = find_mono_struct(ty_mangle(t));
+            if (sd) {
+                if (sd->is_opaque) return false;   /* a pointer C owns */
+                for (int i = 0; i < sd->fields.count; i++)
+                    if (type_has_gc(((Field *)vec_get(&sd->fields, i))->type)) return true;
+                return false;
+            }
+            EnumDecl *ed = find_mono_enum(ty_mangle(t));
+            if (ed) {
+                for (int i = 0; i < ed->variants.count; i++) {
+                    Variant *v = vec_get(&ed->variants, i);
+                    for (int j = 0; j < v->payload.count; j++)
+                        if (type_has_gc(VEC_PTR(&v->payload, j, Type))) return true;
+                }
+                return false;
+            }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+/* Slots used by the function currently being emitted. The prologue is written
+   after its body, so the count is known by then. */
+static int g_slot_count = 0;
+
+/* Register a named local, parameter or temporary as a root. */
+static void root_local(SB *sb, int ind, const Type *t, const char *name) {
+    if (!type_has_gc(t)) return;
+    indent_to(sb, ind);
+    sb_appendf(sb, "_kr[%d].addr = &%s; _kr[%d].size = sizeof %s;\n",
+               g_slot_count, name, g_slot_count, name);
+    g_slot_count++;
+}
+
 /* C leaves the order of evaluation between operands unspecified, but Klang
    promises left to right. Anything that could observe the difference — a call —
    forces earlier operands into temporaries so they run first. */
@@ -3196,12 +3240,17 @@ static bool has_call(Expr *e) {
 /* Emit an operand, optionally pinning it to a temporary so its side effects
    happen before whatever is emitted next. */
 static void cg_operand(Expr *e, SB *out, SB *pre, int ind, bool pin) {
+    /* A collectable intermediate always goes through a rooted temporary: while it
+       waits to be used it may be the only reference, and on WASM a value held in a
+       local is in no memory the collector can see. */
+    if (type_has_gc(e->type)) pin = true;
     if (!pin || e->type->kind == TY_VOID) { cg_expr(e, out, pre, ind); return; }
     SB val; sb_init(&val);
     cg_expr(e, &val, pre, ind);
     char *tmp = fresh_tmp();
     indent_to(pre, ind);
     sb_appendf(pre, "%s %s = %s;\n", c_type(e->type), tmp, val.data);
+    root_local(pre, ind, e->type, tmp);
     sb_append(out, tmp);
 }
 
@@ -3294,12 +3343,15 @@ static void cg_try(Expr *e, SB *out, SB *pre, int ind) {
     char *tmp = fresh_tmp();
     indent_to(pre, ind);
     sb_appendf(pre, "%s %s = %s;\n", im, tmp, inner.data);
+    root_local(pre, ind, it, tmp);
 
     char *om = ty_mangle(g_cg_ret);
     bool is_result = strcmp(it->name, PRELUDE_RESULT) == 0;
     const char *bad = is_result ? "Err" : "None";
     indent_to(pre, ind);
     sb_appendf(pre, "if (%s.tag == %s_TAG_%s) {\n", tmp, im, bad);
+    indent_to(pre, ind + 1);
+    sb_append(pre, "k_frames = _kf.prev;\n");   /* `?` leaves the function early */
     indent_to(pre, ind + 1);
     if (is_result)
         sb_appendf(pre, "return (%s){ .tag = %s_TAG_Err, .data.Err._0 = %s.data.Err._0 };\n", om, om, tmp);
@@ -3434,6 +3486,11 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             char *tmp = fresh_tmp();
             indent_to(pre, ind);
             sb_appendf(pre, "%s %s;\n", c_type(e->type), tmp);
+            if (type_has_gc(e->type)) {
+                indent_to(pre, ind);   /* rooted before it is assigned, so zero it */
+                sb_appendf(pre, "memset(&%s, 0, sizeof %s);\n", tmp, tmp);
+            }
+            root_local(pre, ind, e->type, tmp);
             cg_match(e, pre, ind, tmp);
             sb_append(out, tmp);
             break;
@@ -3443,6 +3500,7 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             char *tmp = fresh_tmp();
             indent_to(pre, ind);
             sb_appendf(pre, "%s %s = %s_new(%d);\n", m, tmp, m, e->args.count);
+            root_local(pre, ind, e->type, tmp);
             for (int i = 0; i < e->args.count; i++) {
                 SB val; sb_init(&val);
                 cg_expr(VEC_PTR(&e->args, i, Expr), &val, pre, ind);
@@ -3521,6 +3579,7 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             char *tmp = fresh_tmp();
             indent_to(pre, ind);
             sb_appendf(pre, "%s %s = %s_new();\n", m, tmp, m);
+            root_local(pre, ind, e->type, tmp);
             for (int i = 0; i < e->args.count; i += 2) {
                 SB kv; sb_init(&kv);
                 SB vv; sb_init(&vv);
@@ -3540,6 +3599,7 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 char *cv = fresh_tmp();
                 indent_to(pre, ind);
                 sb_appendf(pre, "%s %s = %s;\n", c_type(e->lhs->type), cv, cb.data);
+                root_local(pre, ind, e->lhs->type, cv);
                 sb_appendf(out, "%s.fn(%s.env", cv, cv);
                 for (int i = 0; i < e->args.count; i++) {
                     sb_append(out, ", ");
@@ -3724,6 +3784,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             flush(sb, &pre);
             indent_to(sb, ind);
             sb_appendf(sb, "%s %s = %s;\n", c_type(s->decl_type), s->name, line.data);
+            root_local(sb, ind, s->decl_type, s->name);
             break;
         case ST_ASSIGN: {
             /* `m[k] = v` on a map inserts, so it cannot go through the read path
@@ -3783,7 +3844,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             if (cpre.len == 0) {
                 indent_to(sb, ind);
                 sb_appendf(sb, "while (%s) {\n", cval.data);
-            if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
+            { indent_to(sb, ind + 1); sb_append(sb, "K_POLL();\n"); }
                 cg_stmts(&s->body, sb, ind + 1);
                 indent_to(sb, ind);
                 sb_append(sb, "}\n");
@@ -3794,7 +3855,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
                 sb_append(sb, cpre.data);
                 indent_to(sb, ind + 1);
                 sb_appendf(sb, "if (!(%s)) break;\n", cval.data);
-                if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
+                { indent_to(sb, ind + 1); sb_append(sb, "K_POLL();\n"); }
                 cg_stmts(&s->body, sb, ind + 1);
                 indent_to(sb, ind);
                 sb_append(sb, "}\n");
@@ -3824,13 +3885,14 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
                 flush(sb, &pre);
                 indent_to(sb, ind);
                 sb_appendf(sb, "%s %s = %s;\n", c_type(s->expr->type), av, arr.data);
+                root_local(sb, ind, s->expr->type, av);
                 indent_to(sb, ind);
                 sb_appendf(sb, "for (int64_t %s = 0; %s < %s->len; %s++) {\n", idx, idx, av, idx);
                 indent_to(sb, ind + 1);
                 sb_appendf(sb, "%s %s = %s->data[%s]; (void)%s;\n",
                            c_type(ty_elem(s->expr->type)), s->name, av, idx, s->name);
             }
-            if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
+            { indent_to(sb, ind + 1); sb_append(sb, "K_POLL();\n"); }
             cg_stmts(&s->body, sb, ind + 1);
             indent_to(sb, ind);
             sb_append(sb, "}\n");
@@ -3840,9 +3902,15 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             if (s->expr) {
                 cg_expr(s->expr, &line, &pre, ind);
                 flush(sb, &pre);
+                /* The value is computed and copied into a local while the frame is
+                   still current, so nothing it points at can be collected between
+                   being built and being handed back. */
                 indent_to(sb, ind);
-                sb_appendf(sb, "return %s;\n", line.data);
+                sb_appendf(sb, "{ %s _kret = %s; k_frames = _kf.prev; return _kret; }\n",
+                           c_type(g_cg_ret), line.data);
             } else {
+                indent_to(sb, ind);
+                sb_append(sb, "k_frames = _kf.prev;\n");
                 indent_to(sb, ind);
                 sb_append(sb, "return;\n");
             }
@@ -3877,7 +3945,13 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
 }
 
 static void cg_stmts(Vec *body, SB *sb, int ind) {
-    for (int i = 0; i < body->count; i++) cg_stmt(VEC_PTR(body, i, Stmt), sb, ind);
+    for (int i = 0; i < body->count; i++) {
+        /* A statement boundary is a safepoint: everything the previous statement
+           produced is now in a named local, and so in this function's root frame.
+           Nothing is half-built here, which is what makes collecting safe. */
+        if (i > 0) { indent_to(sb, ind); sb_append(sb, "K_POLL();\n"); }
+        cg_stmt(VEC_PTR(body, i, Stmt), sb, ind);
+    }
 }
 
 /* Klang's garbage collector, emitted into every program.
@@ -3937,6 +4011,48 @@ static const char *THREAD_RUNTIME =
     "  static void k_thread_join(k_thread_t t) { pthread_join(t, NULL); }\n"
     "#endif\n\n";
 
+/* Roots the generated code hands over, rather than the collector guessing.
+ *
+ * Each function that holds anything collectable keeps a small array of memory
+ * ranges — one per parameter, local and temporary — and links it into a per-thread
+ * list. The collector walks that list instead of the machine stack.
+ *
+ * A slot is a range rather than a single pointer so that a struct holding three
+ * arrays needs one slot, not three: the range is still scanned conservatively, but
+ * *which* memory to scan is now exact. That is the part WASM makes non-negotiable,
+ * since a value sitting in a WASM local is in no memory the collector can reach.
+ */
+static const char *ROOT_RUNTIME =
+    "/* ── roots ─────────────────────────────────────────────────────────── */\n"
+    "/* Build with -DK_PRECISE_ONLY=1 to switch the stack scan off and rely on the\n"
+    "   root frames alone — which is what a WASM build does whether it asks to or\n"
+    "   not, and so is how the rooting gets tested on a machine that has a stack. */\n"
+    "#ifndef K_PRECISE_ONLY\n"
+    "  #define K_PRECISE_ONLY 0\n"
+    "#endif\n"
+    "/* -DK_GC_STRESS=1 collects at every single allocation. Ruinously slow, and the\n"
+    "   only way to be sure a root is never missed for the one window it matters. */\n"
+    "#ifndef K_GC_STRESS\n"
+    "  #define K_GC_STRESS 0\n"
+    "#endif\n"
+    "typedef struct { void *addr; size_t size; } KRootSlot;\n"
+    "typedef struct KFrame { struct KFrame *prev; int n; KRootSlot *slots; } KFrame;\n"
+    "#if defined(_MSC_VER)\n"
+    "  #define K_TLS __declspec(thread)\n"
+    "#elif defined(__GNUC__) || defined(__clang__)\n"
+    "  #define K_TLS __thread\n"
+    "#else\n"
+    "  #define K_TLS   /* single-threaded builds only */\n"
+    "#endif\n"
+    "#if KLANG_THREADS\n"
+    "K_TLS KFrame *k_frames = NULL;\n"
+    "#else\n"
+    "KFrame *k_frames = NULL;\n"
+    "#endif\n"
+    "/* Constants live for the whole program and belong to no thread, so they get\n"
+    "   their own list that every collection walks. */\n"
+    "KFrame *k_global_frames = NULL;\n\n";
+
 static const char *GC_RUNTIME =
     "/* ── Klang GC: conservative mark-sweep ─────────────────────────────── */\n"
     "typedef struct KObj { struct KObj *next; size_t size; unsigned char mark; } KObj;\n"
@@ -3947,7 +4063,7 @@ static const char *GC_RUNTIME =
     "void **k_tab = NULL;            /* open-addressed set of payload addresses */\n"
     "size_t k_tab_cap = 0, k_tab_n = 0;\n"
     "char *k_lo = NULL, *k_hi = NULL;   /* payload address range, for a fast reject */\n"
-    "size_t k_live = 0, k_limit = 4u << 20;\n"
+    "size_t k_live = 0, k_limit = K_GC_STRESS ? 0 : (4u << 20);\n"
     "void *k_stack_bottom = NULL;\n"
     "KObj **k_gray = NULL; size_t k_gray_n = 0, k_gray_cap = 0;\n"
     "size_t k_collections = 0;\n"
@@ -4028,6 +4144,7 @@ static const char *GC_THREADS =
     "    void *bottom;     /* where this thread's stack begins */\n"
     "    void *top;        /* how far it had grown when it parked */\n"
     "    jmp_buf regs;     /* its callee-saved registers, spilled */\n"
+    "    KFrame *frames;   /* this thread's root list, captured when it parks */\n"
     "    int in_use, parked;\n"
     "} KThread;\n"
     "KThread k_threads[K_MAX_THREADS];\n"
@@ -4067,19 +4184,21 @@ static const char *GC_THREADS =
     "}\n"
     "\n"
     "/* Park until the collector is done. Must be called with the GC mutex held. */\n"
+    "void k_stop_the_world_and_collect(void);\n"
     "void k_park_locked(KThread *self, void *top) {\n"
     "    while (k_stop) {\n"
     "        if (!self->parked) {\n"
-    "            self->top = top; self->parked = 1; k_nparked++;\n"
+    "            self->top = top; self->frames = k_frames; self->parked = 1; k_nparked++;\n"
     "            K_SIGNAL(&k_cond_parked);\n"
     "        }\n"
     "        K_WAIT(&k_cond_resume, &k_gc_mutex);\n"
     "    }\n"
     "    if (self->parked) { self->parked = 0; k_nparked--; }\n"
     "}\n"
-    "/* Emitted at loop back-edges, so a thread that allocates nothing still yields. */\n"
+    /* The only place a collection can begin: between statements and at loop
+       back-edges, where every live value is reachable from a root frame. It is
+       also where a thread yields to a collection somebody else started. */
     "void klang_safepoint(void) {\n"
-    "    if (!k_stop) return;\n"
     "    KThread *self = K_SELF_GET();\n"
     "    if (!self) return;\n"
     "    jmp_buf regs;\n"
@@ -4088,6 +4207,7 @@ static const char *GC_THREADS =
     "    memcpy(self->regs, regs, sizeof regs);\n"
     "    K_LOCK(&k_gc_mutex);\n"
     "    k_park_locked(self, &regs);\n"
+    "    if (k_live > k_limit) k_stop_the_world_and_collect();\n"
     "    K_UNLOCK(&k_gc_mutex);\n"
     "}\n"
     "/* Around a blocking call: the thread holds no live registers the collector\n"
@@ -4100,7 +4220,7 @@ static const char *GC_THREADS =
     "    setjmp(regs);\n"
     "    memcpy(self->regs, regs, sizeof regs);\n"
     "    K_LOCK(&k_gc_mutex);\n"
-    "    self->top = &regs; self->parked = 1; k_nparked++;\n"
+    "    self->top = &regs; self->frames = k_frames; self->parked = 1; k_nparked++;\n"
     "    K_SIGNAL(&k_cond_parked);\n"
     "    K_UNLOCK(&k_gc_mutex);\n"
     "}\n"
@@ -4115,6 +4235,13 @@ static const char *GC_THREADS =
 
 /* Emitted after the thread machinery, because collecting has to know about it. */
 static const char *GC_COLLECT =
+    "/* Every range the generated code registered, up the whole frame list. */\n"
+    "void k_scan_frames(KFrame *f) {\n"
+    "    for (; f; f = f->prev)\n"
+    "        for (int i = 0; i < f->n; i++)\n"
+    "            if (f->slots[i].addr)\n"
+    "                k_scan(f->slots[i].addr, (char *)f->slots[i].addr + f->slots[i].size);\n"
+    "}\n"
     "/* Mark from every root, sweep, rebuild the address set. The caller has already\n"
     "   made sure no other thread is running Klang code. */\n"
     "void k_collect_core(void) {\n"
@@ -4123,19 +4250,30 @@ static const char *GC_COLLECT =
     "    setjmp(regs);                  /* force callee-saved registers onto the stack */\n"
     "    for (KObj *o = k_objs; o; o = o->next) o->mark = 0;\n"
     "    k_gray_n = 0;\n"
+    "#if !K_PRECISE_ONLY\n"
     "    k_scan(&regs, (char *)&regs + sizeof regs);\n"
+    "#endif\n"
+    /* The roots generated code declared. This alone is enough to be correct; the
+       stack scan below is belt and braces on targets that have a real stack. */
+    "    k_scan_frames(k_frames);\n"
+    "    k_scan_frames(k_global_frames);\n"
     "#if KLANG_THREADS\n"
     "    {\n"
     "        KThread *self = K_SELF_GET();\n"
+    "#if !K_PRECISE_ONLY\n"
     "        k_scan((void *)&regs, self ? self->bottom : k_stack_bottom);\n"
+    "#endif\n"
     "        for (int i = 0; i < K_MAX_THREADS; i++) {\n"
     "            KThread *t = &k_threads[i];\n"
     "            if (!t->in_use || t == self || !t->parked) continue;\n"
+    "            k_scan_frames(t->frames);\n"
+    "#if !K_PRECISE_ONLY\n"
     "            k_scan(t->top, t->bottom);\n"
     "            k_scan(t->regs, (char *)t->regs + sizeof t->regs);\n"
+    "#endif\n"
     "        }\n"
     "    }\n"
-    "#else\n"
+    "#elif !defined(__wasm__) && !K_PRECISE_ONLY\n"
     "    k_scan((void *)&regs, k_stack_bottom);\n"
     "#endif\n"
     "    while (k_gray_n) {\n"
@@ -4165,7 +4303,11 @@ static const char *GC_COLLECT =
     "        if (!k_hi || (char *)pl > k_hi) k_hi = pl;\n"
     "    }\n"
     "    k_live = live;\n"
+    "#if K_GC_STRESS\n"
+    "    k_limit = 0;                   /* collect again at the very next allocation */\n"
+    "#else\n"
     "    k_limit = live * 2 < (4u << 20) ? (4u << 20) : live * 2;\n"
+    "#endif\n"
     "    k_collections++;\n"
     "}\n"
     "\n"
@@ -4203,17 +4345,24 @@ static const char *GC_COLLECT =
     "    k_live += n;\n"
     "    return pl;\n"
     "}\n"
+    /* Allocation never collects.
+     *
+     * It is tempting to collect here, since it is the one place that knows the
+     * heap has grown — and that is what this collector used to do. But a runtime
+     * helper like `arr_new` allocates a header and then allocates its buffer, and
+     * between the two the header exists only in a C local of that helper, which is
+     * in no root frame. Collecting inside the second allocation frees it.
+     *
+     * So collection happens only at safepoints, which generated code emits between
+     * statements and at loop back-edges — places where every live value is in a
+     * frame by construction. Allocation just records the growth. */
     "void *klang_gc_alloc(size_t n) {\n"
     "#if KLANG_THREADS\n"
-    "    KThread *self = K_SELF_GET();\n"
     "    K_LOCK(&k_gc_mutex);\n"
-    "    if (self) k_park_locked(self, &self);\n"
-    "    if (k_live + n > k_limit && self) k_stop_the_world_and_collect();\n"
     "    void *pl = k_alloc_raw(n);\n"
     "    K_UNLOCK(&k_gc_mutex);\n"
     "    return pl;\n"
     "#else\n"
-    "    if (k_live + n > k_limit) klang_gc_collect();\n"
     "    return k_alloc_raw(n);\n"
     "#endif\n"
     "}\n"
@@ -4234,7 +4383,10 @@ static const char *GC_COLLECT =
     "}\n"
     "int64_t klang_gc_heap(void) { return (int64_t)k_live; }\n"
     "#if !KLANG_THREADS\n"
-    "void klang_safepoint(void) { }\n"
+    "void klang_safepoint(void) { if (k_live > k_limit) klang_gc_collect(); }\n"
+    "#define K_POLL() do { if (k_live > k_limit) klang_safepoint(); } while (0)\n"
+    "#else\n"
+    "#define K_POLL() do { if (k_live > k_limit || k_stop) klang_safepoint(); } while (0)\n"
     "#endif\n"
     "\n";
 
@@ -4849,34 +5001,64 @@ static void emit_lambda_env(Expr *lam, SB *sb) {
     sb_appendf(sb, "} _klam%d_env;\n", lam->lam_id);
 }
 
+/* The frame has to say how many slots it holds, and that is only known once the
+   body has been emitted — so the body is built first and the prologue prepended. */
+static void emit_frame_prologue(SB *sb, int slots) {
+    sb_appendf(sb, "    KRootSlot _kr[%d];\n", slots > 0 ? slots : 1);
+    sb_append(sb, "    KFrame _kf;\n");
+    sb_append(sb, "    memset(_kr, 0, sizeof _kr);\n");
+    sb_appendf(sb, "    _kf.prev = k_frames; _kf.n = %d; _kf.slots = _kr;\n", slots);
+    sb_append(sb, "    k_frames = &_kf;\n");
+}
+
 static void emit_lambda_body(Expr *lam, SB *sb) {
     Type *saved = g_cg_ret;
+    int saved_slots = g_slot_count;
     g_cg_ret = ty_ret(lam->type);
-    lambda_signature(lam, sb);
-    sb_append(sb, " {\n");
+    g_slot_count = 0;
+
+    SB body; sb_init(&body);
     if (lam->captures.count > 0) {
-        sb_appendf(sb, "    _klam%d_env *_kenv = _kenvp;\n", lam->lam_id);
+        sb_appendf(&body, "    _klam%d_env *_kenv = _kenvp;\n", lam->lam_id);
         /* Captures are copies, exactly as if they had been passed as arguments. */
         for (int i = 0; i < lam->captures.count; i++) {
             Field *c = vec_get(&lam->captures, i);
-            sb_appendf(sb, "    %s %s = _kenv->%s; (void)%s;\n",
+            sb_appendf(&body, "    %s %s = _kenv->%s; (void)%s;\n",
                        c_type(c->type), c->name, c->name, c->name);
+            root_local(&body, 1, c->type, c->name);
         }
     } else {
-        sb_append(sb, "    (void)_kenvp;\n");
+        sb_append(&body, "    (void)_kenvp;\n");
+    }
+    for (int i = 0; i < lam->params.count; i++) {
+        Field *pm = vec_get(&lam->params, i);
+        root_local(&body, 1, pm->type, pm->name);
     }
     if (lam->is_block) {
-        cg_stmts(&lam->body, sb, 1);
+        cg_stmts(&lam->body, &body, 1);
+        sb_append(&body, "    k_frames = _kf.prev;\n");
     } else {
         SB pre; sb_init(&pre);
         SB val; sb_init(&val);
         cg_expr(lam->lhs, &val, &pre, 1);
-        sb_append(sb, pre.data);
-        if (ty_ret(lam->type)->kind == TY_VOID) sb_appendf(sb, "    (void)(%s);\n", val.data);
-        else sb_appendf(sb, "    return %s;\n", val.data);
+        sb_append(&body, pre.data);
+        if (ty_ret(lam->type)->kind == TY_VOID) {
+            sb_appendf(&body, "    (void)(%s);\n", val.data);
+            sb_append(&body, "    k_frames = _kf.prev;\n");
+        } else {
+            sb_appendf(&body, "    %s _kret = %s;\n", c_type(ty_ret(lam->type)), val.data);
+            sb_append(&body, "    k_frames = _kf.prev;\n");
+            sb_append(&body, "    return _kret;\n");
+        }
     }
+
+    lambda_signature(lam, sb);
+    sb_append(sb, " {\n");
+    emit_frame_prologue(sb, g_slot_count);
+    sb_append(sb, body.data);
     sb_append(sb, "}\n\n");
     g_cg_ret = saved;
+    g_slot_count = saved_slots;
 }
 
 static void codegen(SB *sb) {
@@ -4895,6 +5077,7 @@ static void codegen(SB *sb) {
     sb_append(sb, "\n");
     sb_appendf(sb, "#define KLANG_THREADS %d\n\n", g_uses_threads ? 1 : 0);
     if (g_uses_threads) sb_append(sb, THREAD_RUNTIME);
+    sb_append(sb, ROOT_RUNTIME);
     sb_append(sb, GC_RUNTIME);
     if (g_uses_threads) sb_append(sb, GC_THREADS);
     sb_append(sb, GC_COLLECT);
@@ -5009,7 +5192,13 @@ static void codegen(SB *sb) {
     for (int i = 0; i < g_decls.count; i++)
         if (((Decl *)vec_get(&g_decls, i))->kind == DECL_CONST) nconsts++;
     if (nconsts) {
-        sb_append(sb, "void _kinit_consts(void) {\n");
+        /* Two frames here. The temporaries an initializer needs go in an ordinary
+           frame that is popped on the way out; the constants themselves go in a
+           static frame that is never popped, because they stay reachable forever. */
+        SB body; sb_init(&body);
+        SB roots; sb_init(&roots);
+        int nglobal = 0;
+        g_slot_count = 0;
         for (int i = 0; i < g_decls.count; i++) {
             Decl *d = vec_get(&g_decls, i);
             if (d->kind != DECL_CONST) continue;
@@ -5017,10 +5206,29 @@ static void codegen(SB *sb) {
             SB val; sb_init(&val);
             g_cg_ret = ty_void();
             cg_expr(d->c->value, &val, &pre, 1);
-            sb_append(sb, pre.data);
-            sb_appendf(sb, "    %s = %s;\n", d->c->mangled, val.data);
+            sb_append(&body, pre.data);
+            sb_appendf(&body, "    %s = %s;\n", d->c->mangled, val.data);
+            if (type_has_gc(d->c->type)) {
+                sb_appendf(&roots, "    _kg[%d].addr = &%s; _kg[%d].size = sizeof %s;\n",
+                           nglobal, d->c->mangled, nglobal, d->c->mangled);
+                nglobal++;
+            }
         }
+        sb_append(sb, "void _kinit_consts(void) {\n");
+        sb_appendf(sb, "    static KRootSlot _kg[%d];\n", nglobal > 0 ? nglobal : 1);
+        sb_append(sb, "    static KFrame _kgf;\n");
+        emit_frame_prologue(sb, g_slot_count);
+        /* Registered before any initializer runs: the globals start out zeroed, so
+           scanning one that has not been assigned yet finds nothing and is safe,
+           whereas registering afterwards would leave earlier constants unrooted
+           while a later initializer allocates. */
+        sb_append(sb, roots.data);
+        sb_appendf(sb, "    _kgf.prev = k_global_frames; _kgf.n = %d; _kgf.slots = _kg;\n", nglobal);
+        sb_append(sb, "    k_global_frames = &_kgf;\n");
+        sb_append(sb, body.data);
+        sb_append(sb, "    k_frames = _kf.prev;\n");
         sb_append(sb, "}\n\n");
+        g_slot_count = 0;
     }
 
     for (int i = 0; i < g_mono_fns.count; i++) {
@@ -5036,9 +5244,21 @@ static void codegen(SB *sb) {
         }
         if (fd->params.count == 0) sb_append(sb, "void");
         sb_append(sb, ") {\n");
-        cg_stmts(&fd->body, sb, 1);
-        if (is_main) sb_append(sb, "    return 0;\n");
+
+        SB body; sb_init(&body);
+        g_slot_count = 0;
+        for (int j = 0; j < fd->params.count; j++) {
+            Field *pm = vec_get(&fd->params, j);
+            root_local(&body, 1, pm->type, pm->name);
+        }
+        cg_stmts(&fd->body, &body, 1);
+        sb_append(&body, "    k_frames = _kf.prev;\n");
+        if (is_main) sb_append(&body, "    return 0;\n");
+
+        emit_frame_prologue(sb, g_slot_count);
+        sb_append(sb, body.data);
         sb_append(sb, "}\n\n");
+        g_slot_count = 0;
     }
 
     /* The collector scans from its own frame up to this anchor. Taking the anchor

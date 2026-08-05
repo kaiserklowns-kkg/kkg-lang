@@ -1,93 +1,83 @@
-# WASM: where it stands
+# WASM
 
-Short version: **the code generator targets WASM correctly, and the garbage
-collector does not.** Klang cannot yet be used for frontend work, and this file
-records exactly why, what was measured, and what has to change.
+Klang compiles to WASM and runs there correctly. This file records how, what was
+measured, and what is still missing before a browser page can be written in Klang.
 
-## What already works
-
-Klang compiles to C, and that C compiles to WASM and runs:
+## Building
 
 ```sh
 klangc program.kkg -o program.c
-emcc -O2 program.c -o program.js
+emcc -O2 program.c -o program.js -sALLOW_MEMORY_GROWTH
 node program.js
 ```
 
-A program exercising closures, generics, maps, string interpolation and the
-standard library produced the right answers under Node:
+Every example in [examples/](../examples/) passes under Node except two, and both
+for reasons that have nothing to do with WASM:
 
-```
-hello from wasm
-sorted = 2, 4, 10, 16, 18
-upper  = KLANG
-a appears 3 times
-```
+| | |
+|---|---|
+| `server.kkg` | POSIX sockets; a browser has no `socket(2)` |
+| `phase10.kkg` | `spawn`, which needs `-pthread`, `SharedArrayBuffer` and cross-origin isolation |
 
-So the language, the type system, monomorphization and the runtime helpers are
-all fine on a 32-bit target. One genuine bug turned up on the way and is fixed:
-the collector's hash mixed a `uintptr_t`, which is 32 bits on wasm32, so
-`x >> 33` was undefined and the mixing collapsed.
+That includes [tests/gc_stress.kkg](../tests/gc_stress.kkg) and the 120k-allocation
+[examples/gc.kkg](../examples/gc.kkg).
 
-## What does not work
+## What had to change
 
-The collector is **conservative**: it finds live objects by scanning the machine
-stack and registers for anything that looks like a pointer. That works natively
-because C locals live on a stack in addressable memory, and `setjmp` spills the
-registers onto it.
+The collector. It was **conservative**: it found live objects by scanning the machine
+stack and the callee-saved registers for anything that looked like a pointer. That
+works natively because C locals live on a stack in addressable memory and `setjmp`
+spills the registers onto it.
 
-WASM has no such stack. Locals live in the WASM value stack and in indexed
-locals, neither of which is part of linear memory and neither of which can be
-read by pointer arithmetic. Only variables the compiler decides to spill end up
-in the shadow stack. A live pointer held in a WASM local is therefore invisible
-to the collector, which frees the object it points at.
+WASM has no such stack. Locals live in the WASM value stack and in indexed locals,
+neither of which is part of linear memory and neither of which can be read by pointer
+arithmetic. Only variables the compiler decides to spill reach the shadow stack. A
+live pointer held in a WASM local was therefore invisible to the collector, which
+freed the object it pointed at.
 
-This is not theoretical. Building the existing GC regression test for WASM:
+That was measured, not assumed. The GC regression test built for WASM:
 
 | | after fill | after 120k allocations | after collect |
 |---|---|---|---|
 | native | `len=500` | `len=500` | `len=500`, contents intact |
-| wasm | `len=500` | `len=54104512081969` | `len=0` |
+| wasm (before) | `len=500` | `len=54104512081969` | `len=0` |
+| wasm (now) | `len=500` | `len=500` | `len=500`, contents intact |
 
-The array of 500 live records is freed while it is still in use, and its header
-reads back as garbage. Disabling collection makes the WASM run correct again
-(`len=500` throughout), which confirms the collector is the cause rather than
-codegen or the 32-bit target.
+The collector is now **precise**: generated code declares its roots and the collector
+walks them. See [The collector](LANGUAGE_SPEC.md#the-collector) for the design. Two
+things were needed beyond rooting named locals:
 
-## What would fix it
+- **Every intermediate counts.** In `push(keep, makeNode(i))` the new node is live
+  only as an argument. Every GC-typed value now passes through a rooted slot.
+- **Allocation must not collect.** A runtime helper allocates an array header and then
+  its buffer; between the two the header is only in a C local, in no frame.
+  Collecting inside the second allocation freed it. Collection moved to safepoints at
+  statement boundaries, where nothing is half-built.
 
-The collector has to become **precise**: instead of guessing at roots by scanning
-memory, generated code must hand the collector its roots explicitly. Concretely, a
-frame of pointers per function, linked into a list the collector walks, maintained
-so it is correct at every exit including the early returns that `?` produces.
+Two build flags make the root set testable on a machine where a failure is debuggable:
+`-DK_PRECISE_ONLY=1` turns the stack scan off, reproducing WASM's situation, and
+`-DK_GC_STRESS=1` collects at every single allocation so a root missed for one window
+is caught rather than surviving by luck. `make test-gc` runs both. They are how the
+two bugs above were found.
 
-That was considered and deliberately rejected when the collector was written
-(see [The collector](LANGUAGE_SPEC.md#the-collector)): conservative scanning needs
-no cooperation from generated code, so every local, temporary and register-resident
-value is covered for free, while a precise root set has to be right in far more
-places and fails by freeing live data rather than by retaining dead data.
+One 32-bit bug turned up on the way and is fixed: the collector's hash mixed a
+`uintptr_t`, which is 32 bits on wasm32, so `x >> 33` was undefined.
 
-WASM changes that trade-off, because conservative scanning is not merely
-approximate there — it does not work at all. Precision is no longer the more
-error-prone option; it is the only one.
+## Cost
 
-The work is not only rooting named locals. Every intermediate value counts too:
-in `push(keep, makeNode(i))` the new node is live only as an argument while `push`
-may allocate and collect. Every GC-typed value would need to pass through a rooted
-slot, which the existing operand-pinning machinery could be extended to do.
+Rooting is within noise. The 120k-allocation regression test:
 
-## Also missing for frontend
+| | |
+|---|---|
+| conservative | 104 ms |
+| precise | 107 ms |
 
-Even with a precise collector, browser work needs more than a WASM binary:
+## Still missing for frontend
 
-- **DOM access**, which means a story for importing and exporting JavaScript
-  functions — a language feature, not a library.
-- **Threads**, which on the web need `SharedArrayBuffer` and cross-origin
-  isolation. `spawn` would have to map onto Web Workers or be unavailable.
+A WASM binary is not yet a web page:
+
+- **DOM access**, which means importing and exporting JavaScript functions — a
+  language feature, not a library. This is the next piece of work.
+- **Threads** need `-pthread` and, in a browser, `SharedArrayBuffer` with cross-origin
+  isolation. `spawn` would map onto Web Workers or be unavailable.
 - `std/net` and `std/fs` cannot work in a browser at all; they are POSIX.
-
-## Status
-
-Do not describe Klang as supporting WASM. The honest statement is that its output
-compiles and runs there, and that anything which allocates enough to trigger a
-collection is unsafe until the collector is precise.

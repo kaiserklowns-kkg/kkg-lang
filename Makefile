@@ -20,6 +20,19 @@ test: bin/klangc
 		/tmp/klang_$$f; \
 	done
 
+# The root set, checked the only way that proves anything: with the conservative
+# stack scan switched off, so the frames generated code hands over are all the
+# collector has — the situation WASM puts it in whether it likes it or not — and
+# with a collection forced at every allocation, so a missed root cannot slip
+# through the window between one and the next.
+.PHONY: test-gc
+test-gc: bin/klangc
+	@./bin/klangc tests/gc_stress.kkg -o /tmp/klang_gcs.c >/dev/null
+	@echo "=== gc: precise roots only ==="
+	@$(CC) $(CFLAGS) -DK_PRECISE_ONLY=1 -o /tmp/klang_gcs /tmp/klang_gcs.c $(LDLIBS) && /tmp/klang_gcs
+	@echo "=== gc: precise roots only, collecting at every allocation ==="
+	@$(CC) $(CFLAGS) -DK_PRECISE_ONLY=1 -DK_GC_STRESS=1 -o /tmp/klang_gcs /tmp/klang_gcs.c $(LDLIBS) && /tmp/klang_gcs
+
 # Every file here must be rejected, with a useful message.
 .PHONY: test-errors
 test-errors: bin/klangc
@@ -33,7 +46,7 @@ test-errors: bin/klangc
 	done
 
 .PHONY: check
-check: test test-errors
+check: test test-gc test-errors
 
 .PHONY: clean
 clean:

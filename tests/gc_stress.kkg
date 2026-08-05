@@ -1,0 +1,118 @@
+// The same shapes as examples/gc.kkg, sized so it can be run with a collection
+// forced at every single allocation (-DK_GC_STRESS=1). Under that build there is
+// no window in which a missed root goes unnoticed: if a value is ever live only
+// in a place the collector cannot see, it is freed on the spot.
+
+struct Node {
+    id: int,
+    label: string,
+    tags: [string],
+}
+
+fn makeNode(i: int) -> Node {
+    let mut tags: [string] = []
+    push(tags, "tag-${i}-a")
+    push(tags, "tag-${i}-b")
+    return Node { id: i, label: "node-${i}", tags: tags }
+}
+
+// A nested value passed straight into a call: the inner node is live only as an
+// argument, which is exactly the case a conservative scan got for free.
+fn wrap(n: Node) -> [Node] {
+    return [n]
+}
+
+fn labelsOf(ns: [Node]) -> [string] {
+    let mut out: [string] = []
+    for n in ns {
+        push(out, n.label + "/" + n.tags[0])
+    }
+    return out
+}
+
+fn maybe(i: int) -> Option<string> {
+    if i % 3 == 0 {
+        return None
+    }
+    return Some("opt-${i}")
+}
+
+fn digits(s: string) -> Result<int, string> {
+    if s.len() == 0 {
+        return Err("empty")
+    }
+    return Ok(s.len())
+}
+
+// `?` returns early, so the frame has to be popped on that path too.
+fn total(parts: [string]) -> Result<int, string> {
+    let mut sum = 0
+    for p in parts {
+        sum += digits(p)?
+    }
+    return Ok(sum)
+}
+
+fn main() {
+    let mut keep: [Node] = []
+    for i in 0..40 {
+        push(keep, makeNode(i))
+    }
+
+    // Values that only ever exist as arguments and returns.
+    for i in 0..40 {
+        let ls = labelsOf(wrap(makeNode(i)))
+        assert(ls.len() == 1, "wrap/labelsOf lost a node")
+        assert(ls[0] == "node-${i}/tag-${i}-a", "a temporary was collected")
+    }
+
+    // Payloads inside enums, and closures over captured strings.
+    let mut names: [string] = []
+    for i in 0..40 {
+        match maybe(i) {
+            Some(s) => push(names, s)
+            None    => push(names, "none-${i}")
+        }
+    }
+    let prefix = "n:"
+    let tag = |s: string| prefix + s
+    let mut tagged: [string] = []
+    for n in names {
+        push(tagged, tag(n))
+    }
+    assert(tagged.len() == 40, "closure results were lost")
+    assert(tagged[1] == "n:opt-1", "a captured string was collected")
+
+    // Map keys and values, which are separate allocations again.
+    let mut index: {string: [string]} = {}
+    for n in keep {
+        index[n.label] = n.tags
+    }
+    assert(index.len() == 40, "map entries were collected")
+    assert(index["node-7"][1] == "tag-7-b", "a map value was collected")
+
+    match total(names) {
+        Ok(n)  => assert(n > 0, "total should be positive")
+        Err(e) => assert(false, "unexpected error ${e}")
+    }
+    match total(["a", ""]) {
+        Ok(_)  => assert(false, "empty string should fail")
+        Err(e) => assert(e == "empty", "wrong error")
+    }
+
+    gcCollect()
+
+    for i in 0..keep.len() {
+        let n = keep[i]
+        assert(n.id == i, "node id was corrupted")
+        assert(n.label == "node-${i}", "node label was collected")
+        assert(n.tags.len() == 2, "tag array lost entries")
+        assert(n.tags[0] == "tag-${i}-a", "tag 0 was collected")
+        assert(n.tags[1] == "tag-${i}-b", "tag 1 was collected")
+    }
+    assert(index["node-39"][0] == "tag-39-a", "map value corrupted after collect")
+    assert(tagged[38] == "n:opt-38", "closure result corrupted after collect")
+    assert(tagged[39] == "n:none-39", "closure result corrupted after collect")
+
+    println("gc stress: ${keep.len()} nodes, ${tagged.len()} strings, ${index.len()} map entries — all intact")
+}

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.13)
+# Klang Language Spec (v0.14)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -563,35 +563,51 @@ Klang ships its own garbage collector — not a dependency — because the runti
 where latency, concurrency, and future WASM support are ultimately decided, and none
 of those are steerable from behind someone else's allocator.
 
-**Design: conservative mark-sweep.** *Conservative* means the collector does not ask
-the compiler where the live pointers are. It scans the machine stack and the
-callee-saved registers (spilled with `setjmp`), and treats any word that is exactly
-the address of one of its objects as a reference.
+**Design: precise mark-sweep.** Generated code hands the collector its roots; the
+collector never guesses at them.
 
-The tradeoff, stated plainly:
+Each function declares a small array of *root slots* — one per parameter, named local
+and compiler temporary that can hold a heap reference — and links it into a per-thread
+list on entry, unlinking it at every exit including the early `return` that `?`
+produces. Constants get one such frame that is never unlinked, since they live as long
+as the program. A slot is an address *and a size*, so a struct holding three arrays
+costs one slot rather than three: the bytes are still examined a word at a time, but
+*which* bytes to examine is now exact.
 
-- **Cost** — a non-pointer that happens to look like one keeps an object alive a bit
-  longer than necessary, and objects can never be moved, which rules out a compacting
-  collector later without changing this design.
-- **Payoff** — no cooperation is needed from generated code. Every C local, every
-  compiler temporary, and every value the optimizer parked in a register is covered
-  automatically. The alternative, a precise shadow stack, needs every temporary
-  registered and every early `return` to unwind it correctly — far more places to get
-  it subtly wrong, and the failure mode is a freed live object rather than a retained
-  dead one.
+This was not the original design. The collector began conservative — scanning the
+machine stack and callee-saved registers and treating any word that happened to be an
+object address as a reference — because that needs no cooperation from generated code
+and so covers every temporary for free. It was rewritten because **WASM has no stack
+the collector can read.** Locals there live in the WASM value stack and in indexed
+locals, neither of which is addressable memory, so a conservative scan does not merely
+lose precision — it finds nothing at all and frees live objects. Precision stopped
+being the riskier option and became the only one.
+
+The tradeoff that remains: objects still cannot be moved, so a compacting collector
+would be a further change. The measured cost of rooting is within noise (the 120k
+allocation regression test: 104 ms conservative, 107 ms precise).
+
+**Collection happens only at safepoints, never inside allocation.** Allocation is the
+one place that knows the heap grew, and collecting there is the obvious thing to do —
+but it is wrong under a precise root set. A runtime helper such as `arr_new` allocates
+a header and then allocates its buffer, and between the two the header exists only in
+a C local of that helper, which is in no root frame; collecting inside the second
+allocation frees it. So allocation only records the growth, and generated code polls
+between statements and at loop back-edges — places where every live value sits in a
+named local by construction and nothing is half-built. Overshoot between polls is
+bounded by what a single statement can allocate.
 
 Details that matter:
 
-- **Stack anchor.** The C `main` is a wrapper that records a stack address and then
-  calls `klang_main`. Anchoring in an *enclosing* frame is what makes the scan range
-  correct no matter how the C compiler orders locals — anchoring inside `klang_main`
-  itself silently misses any local the compiler placed above the anchor.
 - **String literals** live in `.rodata`, never in the heap, so they simply never
   appear in the object set. No interning pass is needed.
 - **Object identification** is an exact-address hash set with a heap-range fast
   reject, so interior pointers are never followed — and never arise, since the one
   pointer stored inside an object (an array's data buffer) is kept at its base.
 - **Pacing** is adaptive: collect when the heap exceeds `max(4 MB, 2 × live)`.
+- **The stack scan is still there** on targets that have a stack, as belt and braces.
+  It is not load-bearing, and `-DK_PRECISE_ONLY=1` turns it off so that the root set
+  can be tested on a machine where failure is debuggable.
 
 Two builtins make it observable, and `assert(cond, msg)` makes tests fail loudly:
 
@@ -602,8 +618,21 @@ let bytes = gcHeap()   // bytes currently held
 
 [examples/gc.kkg](../examples/gc.kkg) is a regression test: it holds 500 nodes live
 across 120k allocations and asserts every field survived. It is verified at `-O0`
-through `-O3` and `-Os`, because conservative collection is exactly the kind of thing
-that can pass at one optimization level and fail at another.
+through `-O3` and `-Os`, because collection is exactly the kind of thing that can pass
+at one optimization level and fail at another.
+
+[tests/gc_stress.kkg](../tests/gc_stress.kkg) tests the root set specifically, and
+`make test-gc` runs it in the only two configurations that prove anything:
+
+- `-DK_PRECISE_ONLY=1` — the stack scan off, so the frames generated code hands over
+  are all the collector has. This is the situation WASM imposes whether it is asked
+  for or not.
+- `-DK_PRECISE_ONLY=1 -DK_GC_STRESS=1` — the above, plus a collection forced at every
+  single allocation, so a root that is missed for even one window is caught rather
+  than surviving by luck. Ruinously slow, and the only honest test.
+
+Both configurations found real bugs when they were first run, which is the argument
+for keeping them in `make check`.
 
 ## Concurrency
 
@@ -645,11 +674,11 @@ Two things cannot cross, and the compiler says why:
 
 ### How the collector copes
 
-A conservative collector has to see every thread's stack, and no thread may be moving
-objects around while it sweeps. Threads agree to stop at **safepoints**: on allocation,
-at loop back-edges, and around any blocking call. A thread that parks records where its
-stack currently ends and spills its registers, so the collector scans it exactly as it
-scans its own.
+No thread may be building an object while another sweeps, so threads agree to stop at
+**safepoints**: between statements, at loop back-edges, and around any blocking call.
+A thread that parks hands over its root frames, and records where its stack currently
+ends and spills its registers as well, so the collector examines it exactly as it does
+its own.
 
 `await` parks before joining. Without that, a thread sitting in `pthread_join` would
 never reach a safepoint and a collection started elsewhere would wait forever.
@@ -658,7 +687,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.13, Phase 12 complete)
+## Implemented today (v0.14, Phase 13 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -690,6 +719,19 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 13 additions — a precise collector, and WASM that actually works**
+- The collector no longer guesses at roots. Generated code declares a frame of root
+  slots per function and links it into a per-thread list, unlinked at every exit
+  including the early `return` `?` produces. Constants get a frame that never unlinks.
+- Collection moved out of allocation and into safepoints at statement boundaries, so
+  no runtime helper can be caught with a half-built object in a C local
+- `-DK_PRECISE_ONLY=1` turns the stack scan off; `-DK_GC_STRESS=1` collects at every
+  allocation. `make test-gc` runs both, which is how the root set is actually proven.
+- **WASM works.** Every example except the two that need POSIX sockets or threads
+  compiles with `emcc` and runs correctly under Node, including the GC stress test —
+  where before, the 500-node live set was freed while still in use.
+- Cost of precision, measured on the 120k-allocation test: 104 ms → 107 ms
 
 **Phase 12 additions — recursive types, and JSON**
 - A type may contain itself through an array or map, because those are references;
@@ -723,8 +765,8 @@ locking and the safepoints are only emitted when the program actually contains a
   stronger than Rust, which prevents races by proving sharing is disciplined
 - Results come back without a copy — the worker is finished, so there is one owner
 - Closures and extern handles are refused at the boundary, with the reason
-- The collector stops the world at safepoints: allocation, loop back-edges, and
-  around blocking calls; `await` parks before joining so a collection cannot hang
+- The collector stops the world at safepoints: statement boundaries, loop back-edges,
+  and around blocking calls; `await` parks before joining so a collection cannot hang
 - pthreads and Win32 behind one interface; none of it emitted unless you spawn
 - Measured: 2.4s of sequential work finishes in 0.93s across four tasks
 
@@ -790,8 +832,8 @@ locking and the safepoints are only emitted when the program actually contains a
 - A first standard library: `std/math` and `std/list`
 
 **Phase 3 additions**
-- **Klang's own garbage collector** — conservative mark-sweep over the machine stack
-  and registers, with an adaptive collection threshold. Memory is now bounded: the
+- **Klang's own garbage collector** — mark-sweep with an adaptive threshold, at that
+  point conservative over the machine stack and registers. Memory is now bounded: the
   benchmark that peaked at 126 MB before the GC now peaks at 18 MB.
 - `gcCollect()` and `gcHeap()` to force a collection and read live bytes
 - `assert(cond, msg)` — aborts with a message and a non-zero exit status
@@ -806,6 +848,6 @@ Generated C compiles clean under `-Wall -Wextra`.
   compiler rejects them with a clear message rather than looping)
 - `toString` / `==` on structs and enums (match on them instead)
 - Thread/channel send-ownership checking, `spawn`/`await`
-- Any backend other than C (LLVM, WASM are not planned near-term — C gets us "every platform"
+- Any backend other than C (LLVM is not planned near-term — C gets us "every platform"
   for free via the host's C toolchain)
 - Tooling: REPL, formatter, linter, package manager — all future work, not started

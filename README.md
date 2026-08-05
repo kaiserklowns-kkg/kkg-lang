@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.13 — Phase 12 complete
+## Status: v0.14 — Phase 13 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -30,9 +30,11 @@ aspirational.
 - **`for x in xs` and `for i in a..b`**, plus `len` and `push`.
 - **String interpolation** — `"${name} v${version}"`, no `toString` needed.
 - **`mut` parameters**, so a function can say it modifies what it was handed.
-- **Our own garbage collector** — conservative mark-sweep over the machine stack and
-  registers, written for Klang rather than borrowed. A benchmark that peaked at
-  **126 MB** while leaking now peaks at **18 MB**. See
+- **Our own garbage collector** — precise mark-sweep, written for Klang rather than
+  borrowed. Generated code hands over its roots, so the collector never has to guess
+  at them; collection happens at safepoints between statements, never inside an
+  allocation. A benchmark that peaked at **126 MB** while leaking now peaks at
+  **18 MB**, and precision costs 104 ms → 107 ms on the stress test. See
   [The collector](docs/LANGUAGE_SPEC.md#the-collector) for the design and its tradeoffs.
 - **`assert(cond, msg)`**, plus `gcCollect()` and `gcHeap()` to inspect the heap.
 - **Modules** — `import "std/math"`, with `pub` marking what crosses the boundary and
@@ -76,13 +78,16 @@ aspirational.
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
   [std/http](std/http.kkg), [std/json](std/json.kkg).
+- **WASM** — Klang compiles to WASM and runs there correctly. Every example passes
+  under Node except the two that need POSIX sockets or threads. This is what the
+  precise collector was for: WASM locals are not addressable memory, so the old
+  conservative scan found nothing there and freed live objects. See
+  [docs/WASM.md](docs/WASM.md) for the before/after measurements.
 
-**Frontend is not possible yet.** Klang's output does compile and run as WASM —
-closures, generics, maps and the standard library all behave — but the collector
-does not work there, because WASM locals are not addressable memory and a
-conservative scan cannot see them. Anything that allocates enough to trigger a
-collection is unsafe. See [docs/WASM.md](docs/WASM.md) for the measurements and
-what has to change.
+**Frontend is not possible yet**, but the reason has changed. The collector works on
+WASM now; what is missing is a way to call JavaScript — importing and exporting JS
+functions is a language feature, not a library, and it is the next piece of work.
+Threads on the web additionally need `SharedArrayBuffer` and cross-origin isolation.
 `std/net` is POSIX only; Windows needs the Winsock variant.
 
 Also not yet: traits, and all tooling (REPL, formatter, linter, package manager).
