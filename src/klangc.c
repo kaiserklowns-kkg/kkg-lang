@@ -67,14 +67,56 @@ static void sb_appendf(SB *sb, const char *fmt, ...) {
 /* ───────────────────────── error reporting ───────────────────────── */
 
 static const char *g_filename = "input";
+
+/* Every file that has been read, so an error can show the line it happened on. */
+typedef struct { const char *path; const char *src; } SourceFile;
+static SourceFile g_sources[64];
+static int g_nsources = 0;
+
+static void remember_source(const char *path, const char *src) {
+    if (g_nsources < (int)(sizeof g_sources / sizeof g_sources[0])) {
+        g_sources[g_nsources].path = path;
+        g_sources[g_nsources].src = src;
+        g_nsources++;
+    }
+}
+static const char *source_of(const char *path) {
+    for (int i = 0; i < g_nsources; i++)
+        if (strcmp(g_sources[i].path, path) == 0) return g_sources[i].src;
+    return NULL;
+}
+
+/* Print line `want` of `src` without its newline, and without trailing spaces. */
+static void print_source_line(const char *src, int want) {
+    int line = 1;
+    const char *p = src;
+    while (line < want && *p) { if (*p == '\n') line++; p++; }
+    if (line != want) return;
+    const char *end = p;
+    while (*end && *end != '\n') end++;
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+    fprintf(stderr, "  %4d | %.*s\n", want, (int)(end - p), p);
+}
+
+/* Diagnostics read as: what went wrong, where, and what to do about it. A message
+   may carry the last part after an em dash, which is printed as a separate `help:`
+   line rather than run on to a paragraph the reader has to parse. */
 static void fail(int line, const char *fmt, ...) {
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+
+    char *help = strstr(buf, " — ");
+    if (help) { *help = 0; help += strlen(" — "); }
+
     if (line > 0) fprintf(stderr, "%s:%d: error: %s\n", g_filename, line, buf);
     else fprintf(stderr, "%s: error: %s\n", g_filename, buf);
+
+    const char *src = source_of(g_filename);
+    if (src && line > 0) print_source_line(src, line);
+    if (help) fprintf(stderr, "       | help: %s\n", help);
     exit(1);
 }
 
@@ -1806,7 +1848,7 @@ static void request_type(Type *t, int line) {
     if (t->kind == TY_MAP) {
         TyKind kk = ty_key(t)->kind;
         if (kk != TY_INT && kk != TY_STRING && kk != TY_BOOL)
-            fail(line, "a map key must be int, string or bool — %s cannot be hashed",
+            fail(line, "%s cannot be a map key — keys must be int, string or bool",
                  ty_str(ty_key(t)));
         request_type(ty_key(t), line);
         request_type(ty_val(t), line);
@@ -2410,8 +2452,8 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             Var *root = lvalue_root(m, sc);
             if (!root) fail(e->line, "'remove' needs a variable to remove from");
             if (!root->is_mut)
-                fail(e->line, "cannot remove from '%s' because it is immutable "
-                              "(declare it 'let mut' to allow this)", root->name);
+                fail(e->line, "cannot remove from '%s' because it is immutable — "
+                          "declare it 'let mut' to allow this", root->name);
         }
         Type *kt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_key(mt));
         if (!ty_eq(kt, ty_key(mt)))
@@ -2445,8 +2487,8 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (!root)
             fail(e->line, "'push' needs a variable to push into");
         if (!root->is_mut)
-            fail(e->line, "cannot push to '%s' because it is immutable "
-                          "(declare it 'let mut' to allow this)", root->name);
+            fail(e->line, "cannot push to '%s' because it is immutable — "
+                          "declare it 'let mut' to allow this", root->name);
         Type *vt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_elem(at));
         if (!ty_eq(vt, ty_elem(at)))
             fail(e->line, "cannot push %s into %s", ty_str(vt), ty_str(at));
@@ -2609,7 +2651,7 @@ static Type *tc_match(Expr *e, Scope *sc, Type *expected) {
             if (n++) sb_append(&missing, ", ");
             sb_append(&missing, ((Variant *)vec_get(&ed->variants, i))->name);
         }
-        if (n) fail(e->line, "match on %s is not exhaustive — missing: %s (add those arms, or a '_' arm)",
+        if (n) fail(e->line, "match on %s is not exhaustive, missing %s — add those arms, or a '_' arm",
                     ty_str(st), missing.data);
     }
     free(covered);
@@ -2920,8 +2962,8 @@ static void tc_stmt(Stmt *s, Scope *sc) {
                 fail(s->line, "this is not something you can assign to");
             }
             if (!root->is_mut)
-                fail(s->line, "cannot assign to '%s' because it is immutable "
-                              "(declare it 'let mut' to allow this)", root->name);
+                fail(s->line, "cannot assign to '%s' because it is immutable — "
+                          "declare it 'let mut' to allow this", root->name);
             Type *cur = tc_expr(tgt, sc, NULL);
             Type *rt = tc_expr(s->expr, sc, cur);
             if (!ty_eq(cur, rt)) fail(s->line, "cannot assign %s to a target of type %s", ty_str(rt), ty_str(cur));
@@ -5076,6 +5118,7 @@ static void load_module(const char *path, const char *importer, int line);
 static void load_source(char *src, const char *file, const char *module) {
     Parser p;
     g_filename = file;
+    remember_source(file, src);   /* so a later error can quote the line */
     parser_init(&p, src, module, file);
     parse_program(&p);
     for (int i = 0; i < p.imports.count; i++)
