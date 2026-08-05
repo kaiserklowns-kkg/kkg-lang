@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.12)
+# Klang Language Spec (v0.13)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -220,6 +220,34 @@ fn restock(mut items: [Item], name: string) {
     push(items, Item { name: name, qty: 1 })   // the caller sees this
 }
 ```
+
+### Recursive types
+
+A type may contain itself **through an array or a map**, because those are
+references — the recursion goes through a pointer, so there is no infinite layout:
+
+```kkg
+enum Json {
+    Null, Bool(bool), Num(float), Str(string),
+    Arr([Json]),        // fine: an array is a reference
+    Obj([Field]),
+}
+struct Field { key: string, value: Json }
+
+struct Dir { name: string, files: [string], subdirs: [Dir] }
+```
+
+Containing yourself **by value** is still an error, and the message says how to fix it:
+
+```
+type Chain contains itself by value — put the recursive part behind an array,
+as in [Chain], which is a reference
+```
+
+Mutual recursion works too: `Json` holds `[Field]` and `Field` holds `Json`.
+
+This is what makes trees expressible at all — JSON documents, syntax trees,
+directory listings — and it is why [std/json](../std/json.kkg) can exist.
 
 ### Method calls
 
@@ -630,7 +658,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.12, Phase 11 complete)
+## Implemented today (v0.13, Phase 12 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -662,6 +690,18 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 12 additions — recursive types, and JSON**
+- A type may contain itself through an array or map, because those are references;
+  by-value self-containment is still an error, with the fix in the message
+- Mutual recursion works: Json holds [Field], Field holds Json
+- Types are now emitted in three passes — names, then layouts in dependency order,
+  then functions — so a name is always available before it is needed
+- Variants of a `pub enum` you imported resolve unqualified, the way Some and Ok do
+- **`std/json`** — parse and stringify, written in Klang with no FFI. Errors carry
+  the byte offset. Exponent notation and  escapes are refused clearly rather than
+  misread.
+- The server now takes a JSON body and answers with a JSON value
 
 **Phase 11 additions — backend: a real HTTP server**
 - `pokeByte` / `peekByte`, unsafe-only, so a Klang program can build a C struct

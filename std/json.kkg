@@ -1,0 +1,388 @@
+// std/json — reading and writing JSON.
+//
+// Pure Klang: no FFI, no unsafe, nothing platform-specific. It exists at all
+// because a Json value is recursive, and recursion through an array is a
+// reference rather than a cycle:
+//
+//     enum Json { ... Arr([Json]), Obj([Field]) }
+//
+// Parsing returns a Result carrying the byte offset of the problem, so a bad
+// document is a value you handle rather than a crash.
+
+import "std/string" as str
+
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(float),
+    Str(string),
+    Arr([Json]),
+    Obj([Field]),
+}
+
+pub struct Field {
+    key: string,
+    value: Json,
+}
+
+// ── building ──────────────────────────────────────────────────────────
+
+pub fn field(key: string, value: Json) -> Field {
+    return Field { key: key, value: value }
+}
+
+pub fn numOf(n: int) -> Json {
+    return Num(toFloat(n))
+}
+
+// ── reading a value out ───────────────────────────────────────────────
+
+pub fn asString(j: Json) -> Option<string> {
+    return match j {
+        Str(s) => Some(s),
+        _      => None,
+    }
+}
+
+pub fn asFloat(j: Json) -> Option<float> {
+    return match j {
+        Num(n) => Some(n),
+        _      => None,
+    }
+}
+
+pub fn asBool(j: Json) -> Option<bool> {
+    return match j {
+        Bool(b) => Some(b),
+        _       => None,
+    }
+}
+
+pub fn items(j: Json) -> [Json] {
+    return match j {
+        Arr(xs) => xs,
+        _       => [],
+    }
+}
+
+pub fn lookup(j: Json, key: string) -> Option<Json> {
+    return match j {
+        Obj(fs) => firstMatching(fs, key),
+        _       => None,
+    }
+}
+
+fn firstMatching(fs: [Field], key: string) -> Option<Json> {
+    for f in fs {
+        if f.key == key {
+            return Some(f.value)
+        }
+    }
+    return None
+}
+
+// ── writing ───────────────────────────────────────────────────────────
+
+fn escaped(s: string) -> string {
+    let mut out = ""
+    for i in 0..s.len() {
+        let b = s.byteAt(i)
+        if b == 34 {
+            out = out + "\\\""
+        } else if b == 92 {
+            out = out + "\\\\"
+        } else if b == 10 {
+            out = out + "\\n"
+        } else if b == 13 {
+            out = out + "\\r"
+        } else if b == 9 {
+            out = out + "\\t"
+        } else if b == 8 {
+            out = out + "\\b"
+        } else if b == 12 {
+            out = out + "\\f"
+        } else if b < 32 {
+            out = out + "\\u00" + hexByte(b)
+        } else {
+            out = out + fromByte(b)
+        }
+    }
+    return out
+}
+
+fn hexByte(b: int) -> string {
+    let digits = "0123456789abcdef"
+    return digits.substr(b / 16, b / 16 + 1) + digits.substr(b % 16, b % 16 + 1)
+}
+
+// Whole numbers print without a decimal point, which is what readers expect.
+fn numText(n: float) -> string {
+    let whole = toInt(n)
+    if toFloat(whole) == n {
+        return "${whole}"
+    }
+    return "${n}"
+}
+
+pub fn stringify(j: Json) -> string {
+    return match j {
+        Null    => "null",
+        Bool(b) => "${b}",
+        Num(n)  => numText(n),
+        Str(s)  => "\"" + escaped(s) + "\"",
+        Arr(xs) => stringifyArr(xs),
+        Obj(fs) => stringifyObj(fs),
+    }
+}
+
+fn stringifyArr(xs: [Json]) -> string {
+    let mut parts: [string] = []
+    for x in xs {
+        push(parts, stringify(x))
+    }
+    return "[" + parts.join(",") + "]"
+}
+
+fn stringifyObj(fs: [Field]) -> string {
+    let mut parts: [string] = []
+    for f in fs {
+        push(parts, "\"" + escaped(f.key) + "\":" + stringify(f.value))
+    }
+    return "{" + parts.join(",") + "}"
+}
+
+// ── parsing ───────────────────────────────────────────────────────────
+//
+// A hand-written recursive descent parser. The cursor is an array of one int so
+// that the recursive helpers can advance a position they all share.
+
+pub fn parse(text: string) -> Result<Json, string> {
+    let mut at = [0]
+    skipSpace(text, at)
+    let v = parseValue(text, at)?
+    skipSpace(text, at)
+    if at[0] != text.len() {
+        return Err("unexpected text at ${at[0]}")
+    }
+    return Ok(v)
+}
+
+fn skipSpace(s: string, mut at: [int]) {
+    while at[0] < s.len() {
+        let b = s.byteAt(at[0])
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            at[0] += 1
+        } else {
+            break
+        }
+    }
+}
+
+fn parseValue(s: string, mut at: [int]) -> Result<Json, string> {
+    if at[0] >= s.len() {
+        return Err("unexpected end of input")
+    }
+    let b = s.byteAt(at[0])
+    if b == 123 { return parseObject(s, at) }
+    if b == 91  { return parseArray(s, at) }
+    if b == 34  { return parseStringValue(s, at) }
+    if literalAt(s, at, "true")  { return Ok(Bool(true)) }
+    if literalAt(s, at, "false") { return Ok(Bool(false)) }
+    if literalAt(s, at, "null")  { return Ok(Null) }
+    if b == 45 || (b >= 48 && b <= 57) { return parseNumber(s, at) }
+    return Err("unexpected character '${fromByte(b)}' at ${at[0]}")
+}
+
+fn literalAt(s: string, mut at: [int], word: string) -> bool {
+    if at[0] + word.len() > s.len() {
+        return false
+    }
+    if s.substr(at[0], at[0] + word.len()) != word {
+        return false
+    }
+    at[0] += word.len()
+    return true
+}
+
+fn parseNumber(s: string, mut at: [int]) -> Result<Json, string> {
+    let start = at[0]
+    if at[0] < s.len() && s.byteAt(at[0]) == 45 {
+        at[0] += 1
+    }
+    let mut digits = 0
+    while at[0] < s.len() {
+        let b = s.byteAt(at[0])
+        if b >= 48 && b <= 57 {
+            digits += 1
+            at[0] += 1
+        } else if b == 46 || b == 101 || b == 69 || b == 43 || b == 45 {
+            at[0] += 1
+        } else {
+            break
+        }
+    }
+    if digits == 0 {
+        return Err("expected a number at ${start}")
+    }
+    let text = s.substr(start, at[0])
+    match parseFloatText(text) {
+        Ok(v)  => { return Ok(Num(v)) }
+        Err(e) => { return Err("${e} at ${start}") }
+    }
+}
+
+// Klang has no float parser of its own yet, so this handles the shape JSON uses:
+// an optional sign, digits, an optional fraction. Exponents are rejected clearly
+// rather than silently misread.
+fn parseFloatText(text: string) -> Result<float, string> {
+    if text.contains("e") || text.contains("E") {
+        return Err("exponent notation is not supported yet")
+    }
+    let dot = text.indexOf(".")
+    if dot < 0 {
+        match str.parseInt(text) {
+            Ok(n)  => { return Ok(toFloat(n)) }
+            Err(e) => { return Err(e) }
+        }
+    }
+    let wholeText = text.substr(0, dot)
+    let fracText = text.substr(dot + 1, text.len())
+    // The sign has to come from the text: "-0.25" has a whole part of -0, and
+    // zero has no sign once it is a number.
+    let negative = wholeText.startsWith("-")
+    let mut whole = 0
+    if wholeText != "-" && wholeText != "" {
+        match str.parseInt(wholeText) {
+            Ok(n)  => { whole = n }
+            Err(e) => { return Err(e) }
+        }
+    }
+    let mut scale = 1.0
+    let mut frac = 0.0
+    for i in 0..fracText.len() {
+        let b = fracText.byteAt(i)
+        if b < 48 || b > 57 {
+            return Err("'${text}' is not a number")
+        }
+        scale = scale * 10.0
+        frac = frac + toFloat(b - 48) / scale
+    }
+    // `whole` already carries the sign for anything below -0, so work in
+    // magnitudes and reapply it once at the end.
+    let mut magnitude = toFloat(whole)
+    if magnitude < 0.0 {
+        magnitude = 0.0 - magnitude
+    }
+    let value = magnitude + frac
+    if negative {
+        return Ok(0.0 - value)
+    }
+    return Ok(value)
+}
+
+fn parseStringValue(s: string, mut at: [int]) -> Result<Json, string> {
+    let text = parseStringBody(s, at)?
+    return Ok(Str(text))
+}
+
+fn parseStringBody(s: string, mut at: [int]) -> Result<string, string> {
+    if at[0] >= s.len() || s.byteAt(at[0]) != 34 {
+        return Err("expected a string at ${at[0]}")
+    }
+    at[0] += 1
+    let mut out = ""
+    while at[0] < s.len() {
+        let b = s.byteAt(at[0])
+        if b == 34 {
+            at[0] += 1
+            return Ok(out)
+        }
+        if b == 92 {
+            at[0] += 1
+            if at[0] >= s.len() {
+                return Err("unfinished escape at ${at[0]}")
+            }
+            let e = s.byteAt(at[0])
+            if e == 110 { out = out + "\n" }
+            else if e == 114 { out = out + "\r" }
+            else if e == 116 { out = out + "\t" }
+            else if e == 34 { out = out + "\"" }
+            else if e == 92 { out = out + "\\" }
+            else if e == 98 { out = out + fromByte(8) }
+            else if e == 102 { out = out + fromByte(12) }
+            else if e == 47 { out = out + "/" }
+            else if e == 117 { return Err("\\u escapes are not supported yet") }
+            else { return Err("unknown escape at ${at[0]}") }
+            at[0] += 1
+        } else {
+            out = out + fromByte(b)
+            at[0] += 1
+        }
+    }
+    return Err("unterminated string")
+}
+
+fn parseArray(s: string, mut at: [int]) -> Result<Json, string> {
+    at[0] += 1
+    let mut out: [Json] = []
+    skipSpace(s, at)
+    if at[0] < s.len() && s.byteAt(at[0]) == 93 {
+        at[0] += 1
+        return Ok(Arr(out))
+    }
+    while true {
+        skipSpace(s, at)
+        let v = parseValue(s, at)?
+        push(out, v)
+        skipSpace(s, at)
+        if at[0] >= s.len() {
+            return Err("unterminated array")
+        }
+        let b = s.byteAt(at[0])
+        if b == 44 {
+            at[0] += 1
+        } else if b == 93 {
+            at[0] += 1
+            return Ok(Arr(out))
+        } else {
+            return Err("expected ',' or ']' at ${at[0]}")
+        }
+    }
+    return Err("unterminated array")
+}
+
+fn parseObject(s: string, mut at: [int]) -> Result<Json, string> {
+    at[0] += 1
+    let mut out: [Field] = []
+    skipSpace(s, at)
+    if at[0] < s.len() && s.byteAt(at[0]) == 125 {
+        at[0] += 1
+        return Ok(Obj(out))
+    }
+    while true {
+        skipSpace(s, at)
+        let key = parseStringBody(s, at)?
+        skipSpace(s, at)
+        if at[0] >= s.len() || s.byteAt(at[0]) != 58 {
+            return Err("expected ':' at ${at[0]}")
+        }
+        at[0] += 1
+        skipSpace(s, at)
+        let v = parseValue(s, at)?
+        push(out, Field { key: key, value: v })
+        skipSpace(s, at)
+        if at[0] >= s.len() {
+            return Err("unterminated object")
+        }
+        let b = s.byteAt(at[0])
+        if b == 44 {
+            at[0] += 1
+        } else if b == 125 {
+            at[0] += 1
+            return Ok(Obj(out))
+        } else {
+            return Err("expected ',' or '}' at ${at[0]}")
+        }
+    }
+    return Err("unterminated object")
+}

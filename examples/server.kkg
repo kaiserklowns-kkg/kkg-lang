@@ -9,12 +9,13 @@
 //   ./server 8080
 
 import "std/net"
+import "std/json"
 import "std/http"
 import "std/list"
 import "std/string" as str
 
 const PORT = 8080
-const MAX_REQUESTS = 8      // the demo serves this many, then stops
+const MAX_REQUESTS = 8
 
 fn escape(s: string) -> string {
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -45,12 +46,38 @@ fn handle(req: http.Request) -> http.Response {
     }
 
     if req.path == "/stats" {
-        let headerCount = req.headers.keys().len()
-        return http.json(jsonOf([
-            "\"method\":\"${req.method}\"",
-            "\"headers\":${headerCount}",
-            "\"heapBytes\":${gcHeap()}",
-        ]))
+        // Built as a real JSON value, so escaping is the library's problem.
+        return http.json(json.stringify(Obj([
+            json.field("method", Str(req.method)),
+            json.field("headers", json.numOf(req.headers.keys().len())),
+            json.field("heapBytes", json.numOf(gcHeap())),
+        ])))
+    }
+
+    // Reads a JSON body and answers with a JSON value, which is the shape most
+    // web APIs actually have.
+    if req.path == "/sum" {
+        match json.parse(req.body) {
+            Err(e) => { return http.badRequest("bad json: ${e}") }
+            Ok(doc) => {
+                match json.lookup(doc, "values") {
+                    None => { return http.badRequest("expected a 'values' array") }
+                    Some(vals) => {
+                        let mut total = 0.0
+                        for v in json.items(vals) {
+                            match json.asFloat(v) {
+                                Some(n)  => { total = total + n }
+                                None     => { return http.badRequest("values must be numbers") }
+                            }
+                        }
+                        return http.json(json.stringify(Obj([
+                            json.field("count", json.numOf(json.items(vals).len())),
+                            json.field("sum", Num(total)),
+                        ])))
+                    }
+                }
+            }
+        }
     }
 
     if req.path == "/echo" {

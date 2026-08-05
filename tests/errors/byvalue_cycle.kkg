@@ -1,0 +1,5 @@
+struct Node { label: string, next: Node }
+fn make() -> Node {
+    return Node { label: "a", next: Node { label: "b", next: make() } }
+}
+fn main() { println("${make().label}") }

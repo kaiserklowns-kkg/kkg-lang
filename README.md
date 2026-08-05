@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.12 — Phase 11 complete
+## Status: v0.13 — Phase 12 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -62,6 +62,11 @@ aspirational.
   C, so this is not pedantry. Measured at 5–15% on a loop of pure arithmetic;
   `wrapAdd` / `wrapSub` / `wrapMul` when wrapping is what you actually mean.
 - **`toInt` / `toFloat`** — no implicit numeric conversions, and no undefined edges.
+- **Recursive types** — a type may contain itself through an array or map, because
+  those are references. Trees, syntax trees and JSON documents are expressible;
+  by-value self-containment is still an error, with the fix in the message.
+- **[std/json](std/json.kkg)** — parse and stringify, written in Klang with no FFI.
+  Errors carry the byte offset of the problem.
 - **Backend** — [std/net](std/net.kkg) gives TCP over POSIX sockets behind a `Result`
   API, [std/http](std/http.kkg) parses requests and builds responses, and
   [examples/server.kkg](examples/server.kkg) is a working HTTP server: HTML, JSON,
@@ -70,13 +75,12 @@ aspirational.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
-  [std/http](std/http.kkg).
+  [std/http](std/http.kkg), [std/json](std/json.kkg).
 
 **Frontend is not possible yet.** That needs a WASM target, and there isn't one.
 `std/net` is POSIX only; Windows needs the Winsock variant.
 
-Also not yet: JSON parsing (it wants recursive types, which the compiler still
-rejects), traits, and all tooling (REPL, formatter, linter, package manager).
+Also not yet: traits, and all tooling (REPL, formatter, linter, package manager).
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
@@ -162,7 +166,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase8.kkg](examples/phase8.kkg),
 [examples/phase9.kkg](examples/phase9.kkg),
 [examples/phase10.kkg](examples/phase10.kkg),
-[examples/server.kkg](examples/server.kkg), and
+[examples/server.kkg](examples/server.kkg),
+[examples/json.kkg](examples/json.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

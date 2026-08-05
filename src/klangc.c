@@ -1551,9 +1551,19 @@ static const char *crossing_problem(const Type *t) {
 /* Which module's body is being type-checked; drives unqualified name resolution. */
 static const char *g_cur_module = MOD_ROOT;
 
-/* What a module can see without qualifying: its own declarations, and the prelude. */
+/* Which modules a variant name may come from without being qualified: your own,
+   the prelude, and anything you imported. `Some` and `Ok` already work this way,
+   so a `pub enum` you imported should too. Two enums offering the same variant
+   name is caught and reported rather than silently picking one. */
 static bool visible_unqualified(const char *module) {
-    return strcmp(module, g_cur_module) == 0 || strcmp(module, MOD_PRELUDE) == 0;
+    if (strcmp(module, g_cur_module) == 0 || strcmp(module, MOD_PRELUDE) == 0) return true;
+    for (int i = 0; i < g_modules.count; i++) {
+        ModuleInfo *mi = vec_get(&g_modules, i);
+        if (strcmp(mi->module, g_cur_module) != 0) continue;
+        for (int j = 0; j < mi->imports.count; j++)
+            if (strcmp(VEC_PTR(&mi->imports, j, char), module) == 0) return true;
+    }
+    return false;
 }
 
 /* Variants are written unqualified (`Some(x)`, not `Option::Some(x)`), so find the
@@ -4318,10 +4328,19 @@ static const char *RUNTIME =
 
 /* Arrays are heap objects behind a pointer, so pushing through one binding is
    visible through every other binding — no surprise copies. */
+/* An array is a pointer, so naming one needs nothing at all — this is what lets a
+   type contain an array of itself. */
+static void emit_array_decl(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "typedef struct %s_s *%s;\n", m, m);
+}
+static void emit_array_def(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "struct %s_s { int64_t len; int64_t cap; %s *data; };\n", m, c_type(ty_elem(t)));
+}
 static void emit_array(const Type *t, SB *sb) {
     char *m = ty_mangle(t);
     const char *e = c_type(ty_elem(t));
-    sb_appendf(sb, "typedef struct %s_s { int64_t len; int64_t cap; %s *data; } *%s;\n", m, e, m);
     /* The header is allocated first and kept in a local, so it is visible to the
        collector on the stack while the data buffer is being allocated. */
     sb_appendf(sb, "%s %s_new(int64_t n) {\n"
@@ -4412,16 +4431,20 @@ static void emit_enum_copy(EnumDecl *ed, SB *sb) {
 
 /* One task type per result type: the thread, its result, and a join that hands
    ownership of the result to whoever awaited it. */
+static void emit_task_decl(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "typedef struct %s_s *%s;\n", m, m);
+}
 static void emit_task(const Type *t, SB *sb) {
     char *m = ty_mangle(t);
     const char *r = c_type(ty_elem(t));
-    sb_appendf(sb, "typedef struct %s_s {\n"
+    sb_appendf(sb, "struct %s_s {\n"
                    "    k_thread_t th;\n"
                    "    %s (*fn)(void *);\n"
                    "    void *env;\n"
                    "    %s result;\n"
                    "    int joined;\n"
-                   "} *%s;\n", m, r, r, m);
+                   "};\n", m, r, r);
     sb_appendf(sb, "k_ret_t K_THREAD_CALL %s_run(void *arg) {\n"
                    "    %s t = arg;\n"
                    "    int anchor = 0;\n"
@@ -4456,16 +4479,30 @@ static void emit_task(const Type *t, SB *sb) {
 /* A closure is a code pointer plus an environment pointer, passed by value. The
    environment is GC-allocated, so the collector traces whatever was captured
    without needing to be told anything about it. */
+static void emit_fntype_decl(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "typedef struct %s %s;\n", m, m);
+}
 static void emit_fntype(const Type *t, SB *sb) {
     char *m = ty_mangle(t);
-    sb_appendf(sb, "typedef struct %s { %s (*fn)(void *", m, c_type(ty_ret(t)));
+    sb_appendf(sb, "struct %s { %s (*fn)(void *", m, c_type(ty_ret(t)));
     for (int i = 0; i < ty_nparams(t); i++) sb_appendf(sb, ", %s", c_type(ty_param(t, i)));
-    sb_appendf(sb, "); void *env; } %s;\n\n", m);
+    sb_append(sb, "); void *env; };\n\n");
 }
 
 /* Open-addressed hash map with linear probing and tombstones. One is emitted per
    distinct (key, value) pair, so lookups compare and hash concrete types with no
    indirection through function pointers. */
+static void emit_map_decl(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "typedef struct %s_s *%s;\n", m, m);
+}
+static void emit_map_def(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "struct %s_slot { %s key; %s val; unsigned char state; };\n",
+               m, c_type(ty_key(t)), c_type(ty_val(t)));
+    sb_appendf(sb, "struct %s_s { int64_t len; int64_t cap; struct %s_slot *slots; };\n", m, m);
+}
 static void emit_map(const Type *t, SB *sb) {
     char *m = ty_mangle(t);
     const Type *kt = ty_key(t);
@@ -4477,14 +4514,12 @@ static void emit_map(const Type *t, SB *sb) {
     const char *cast = kt->kind == TY_STRING ? "" : "(int64_t)";
     const char *eq   = kt->kind == TY_STRING ? "klang_str_eq(a, b)" : "a == b";
 
-    sb_appendf(sb, "typedef struct %s_slot { %s key; %s val; unsigned char state; } %s_slot;\n", m, k, v, m);
-    sb_appendf(sb, "typedef struct %s_s { int64_t len; int64_t cap; %s_slot *slots; } *%s;\n", m, m, m);
     sb_appendf(sb, "int %s_keq(%s a, %s b) { return %s; }\n", m, k, k, eq);
     sb_appendf(sb, "%s %s_new(void) {\n"
                    "    %s d = klang_gc_alloc(sizeof(struct %s_s));\n"
                    "    d->len = 0; d->cap = 8; d->slots = NULL;\n"
-                   "    d->slots = klang_gc_alloc(sizeof(%s_slot) * 8);\n"
-                   "    memset(d->slots, 0, sizeof(%s_slot) * 8);\n"
+                   "    d->slots = klang_gc_alloc(sizeof(struct %s_slot) * 8);\n"
+                   "    memset(d->slots, 0, sizeof(struct %s_slot) * 8);\n"
                    "    return d;\n}\n", m, m, m, m, m, m);
     /* Returns the slot holding `key`, or the first free slot it could go in. */
     sb_appendf(sb, "int64_t %s_probe(%s d, %s key) {\n"
@@ -4500,9 +4535,9 @@ static void emit_map(const Type *t, SB *sb) {
     sb_appendf(sb, "void %s_put(%s d, %s key, %s val);\n", m, m, k, v);
     sb_appendf(sb, "void %s_regrow(%s d) {\n"
                    "    int64_t oldcap = d->cap;\n"
-                   "    %s_slot *old = d->slots;\n"
-                   "    %s_slot *ns = klang_gc_alloc(sizeof(%s_slot) * (size_t)(oldcap * 2));\n"
-                   "    memset(ns, 0, sizeof(%s_slot) * (size_t)(oldcap * 2));\n"
+                   "    struct %s_slot *old = d->slots;\n"
+                   "    struct %s_slot *ns = klang_gc_alloc(sizeof(struct %s_slot) * (size_t)(oldcap * 2));\n"
+                   "    memset(ns, 0, sizeof(struct %s_slot) * (size_t)(oldcap * 2));\n"
                    "    d->slots = ns; d->cap = oldcap * 2; d->len = 0;\n"
                    "    for (int64_t i = 0; i < oldcap; i++)\n"
                    "        if (old[i].state == 1) %s_put(d, old[i].key, old[i].val);\n"
@@ -4537,34 +4572,41 @@ static void emit_map(const Type *t, SB *sb) {
 }
 
 /* Collect the mangled names of named types a mono type embeds by value. */
+/* Only types stored *by value* inside another force an ordering. Arrays, maps and
+   tasks are pointers to a heap object, so holding one needs nothing but the name —
+   which is why `enum Json { Arr([Json]) }` is not a cycle even though it looks like
+   one. Structs, enums and closures are stored inline and must be complete. */
 static void collect_deps(const Type *t, Vec *out) {
-    if (t->kind != TY_NAMED && t->kind != TY_ARRAY && t->kind != TY_MAP && t->kind != TY_FN) return;
+    if (t->kind != TY_NAMED && t->kind != TY_FN) return;
     VEC_PUSH_PTR(out, ty_mangle(t));
 }
 
+static void emit_struct_decl(StructDecl *sd, SB *sb) {
+    if (sd->is_opaque) sb_appendf(sb, "typedef void *%s;\n", sd->mangled);
+    else sb_appendf(sb, "typedef struct %s %s;\n", sd->mangled, sd->mangled);
+}
 static void emit_struct(StructDecl *sd, SB *sb) {
-    if (sd->is_opaque) {
-        /* A C pointer Klang can hold and pass back, but never look inside. */
-        sb_appendf(sb, "typedef void *%s;\n\n", sd->mangled);
-        return;
-    }
-    sb_appendf(sb, "typedef struct %s {\n", sd->mangled);
+    if (sd->is_opaque) return;   /* nothing to define: it is a bare pointer */
+    sb_appendf(sb, "struct %s {\n", sd->mangled);
     for (int i = 0; i < sd->fields.count; i++) {
         Field *f = vec_get(&sd->fields, i);
         sb_appendf(sb, "    %s %s;\n", c_type(f->type), f->name);
     }
     if (sd->fields.count == 0) sb_append(sb, "    char _empty;\n");
-    sb_appendf(sb, "} %s;\n\n", sd->mangled);
+    sb_append(sb, "};\n\n");
 }
 
-static void emit_enum(EnumDecl *ed, SB *sb) {
+static void emit_enum_decl(EnumDecl *ed, SB *sb) {
     sb_append(sb, "enum {");
     for (int i = 0; i < ed->variants.count; i++) {
         Variant *v = vec_get(&ed->variants, i);
         sb_appendf(sb, "%s %s_TAG_%s = %d", i ? "," : "", ed->mangled, v->name, i);
     }
     sb_append(sb, " };\n");
-    sb_appendf(sb, "typedef struct %s {\n    int tag;\n", ed->mangled);
+    sb_appendf(sb, "typedef struct %s %s;\n", ed->mangled, ed->mangled);
+}
+static void emit_enum(EnumDecl *ed, SB *sb) {
+    sb_appendf(sb, "struct %s {\n    int tag;\n", ed->mangled);
     bool any_payload = false;
     for (int i = 0; i < ed->variants.count; i++)
         if (((Variant *)vec_get(&ed->variants, i))->payload.count > 0) any_payload = true;
@@ -4580,31 +4622,58 @@ static void emit_enum(EnumDecl *ed, SB *sb) {
         }
         sb_append(sb, "    } data;\n");
     }
-    sb_appendf(sb, "} %s;\n\n", ed->mangled);
+    sb_append(sb, "};\n\n");
 }
 
-/* Types embed each other by value, so emit them in dependency order. */
+/* Types are written in three passes.
+ *
+ *   1. Names.  Every type gets a typedef that says nothing about its contents, so
+ *      anything may refer to anything by name from here on.
+ *   2. Layouts. Emitted in dependency order, where the only dependency that counts
+ *      is being stored *by value*: a struct field, an enum payload, a map slot, a
+ *      task's result. An array of T needs nothing but T's name, which is exactly
+ *      why `enum Json { Arr([Json]) }` is legal — the recursion goes through a
+ *      pointer. A type that genuinely contains itself by value is still an error.
+ *   3. Functions. Everything is complete by now, so sizeof and field access work.
+ */
 static void emit_types(SB *sb) {
     int n_s = g_mono_structs.count, n_e = g_mono_enums.count;
-    int n_a = g_mono_arrays.count, n_m = g_mono_maps.count, n_f = g_mono_fntypes.count;
-    int total = n_s + n_e + n_a + n_m + n_f;
-    bool *done = calloc((size_t)total, sizeof(bool));
+    int n_a = g_mono_arrays.count, n_m = g_mono_maps.count;
+    int n_f = g_mono_fntypes.count, n_t = g_mono_tasks.count;
+
+    /* ── 1. names ── */
+    for (int i = 0; i < n_s; i++) emit_struct_decl(VEC_PTR(&g_mono_structs, i, StructDecl), sb);
+    for (int i = 0; i < n_e; i++) emit_enum_decl(VEC_PTR(&g_mono_enums, i, EnumDecl), sb);
+    for (int i = 0; i < n_a; i++) emit_array_decl(VEC_PTR(&g_mono_arrays, i, Type), sb);
+    for (int i = 0; i < n_m; i++) emit_map_decl(VEC_PTR(&g_mono_maps, i, Type), sb);
+    for (int i = 0; i < n_f; i++) emit_fntype_decl(VEC_PTR(&g_mono_fntypes, i, Type), sb);
+    for (int i = 0; i < n_t; i++) emit_task_decl(VEC_PTR(&g_mono_tasks, i, Type), sb);
+    sb_append(sb, "\n");
+
+    /* ── 2. layouts, in dependency order ── */
+    int total = n_s + n_e + n_m + n_f + n_t;
+    bool *done = calloc((size_t)(total ? total : 1), sizeof(bool));
     Vec emitted; vec_init(&emitted, sizeof(char *));
 
     for (int pass = 0; pass < total + 1; pass++) {
         bool progress = false;
         for (int i = 0; i < total; i++) {
             if (done[i]) continue;
-            StructDecl *sd = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl) : NULL;
-            EnumDecl *ed = (!sd && i < n_s + n_e) ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl) : NULL;
-            Type *at = (!sd && !ed && i < n_s + n_e + n_a)
-                     ? VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type) : NULL;
-            Type *mt = (!sd && !ed && !at && i < n_s + n_e + n_a + n_m)
-                     ? VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type) : NULL;
-            Type *ft = (!sd && !ed && !at && !mt)
-                     ? VEC_PTR(&g_mono_fntypes, i - n_s - n_e - n_a - n_m, Type) : NULL;
+            int k = i;
+            StructDecl *sd = k < n_s ? VEC_PTR(&g_mono_structs, k, StructDecl) : NULL;
+            k -= n_s;
+            EnumDecl *ed = (!sd && k < n_e) ? VEC_PTR(&g_mono_enums, k, EnumDecl) : NULL;
+            k -= n_e;
+            Type *mt = (!sd && !ed && k < n_m) ? VEC_PTR(&g_mono_maps, k, Type) : NULL;
+            k -= n_m;
+            Type *ft = (!sd && !ed && !mt && k < n_f) ? VEC_PTR(&g_mono_fntypes, k, Type) : NULL;
+            k -= n_f;
+            Type *tt = (!sd && !ed && !mt && !ft) ? VEC_PTR(&g_mono_tasks, k, Type) : NULL;
+
             const char *mangled = sd ? sd->mangled : ed ? ed->mangled
-                                : ty_mangle(at ? at : mt ? mt : ft);
+                                : ty_mangle(mt ? mt : ft ? ft : tt);
+            const char *shown = sd ? key_show(sd->key) : ed ? key_show(ed->key)
+                              : ty_str(mt ? mt : ft ? ft : tt);
 
             Vec deps; vec_init(&deps, sizeof(char *));
             if (sd) {
@@ -4613,42 +4682,38 @@ static void emit_types(SB *sb) {
             } else if (ed) {
                 for (int j = 0; j < ed->variants.count; j++) {
                     Variant *v = vec_get(&ed->variants, j);
-                    for (int k = 0; k < v->payload.count; k++)
-                        collect_deps(VEC_PTR(&v->payload, k, Type), &deps);
+                    for (int q = 0; q < v->payload.count; q++)
+                        collect_deps(VEC_PTR(&v->payload, q, Type), &deps);
                 }
-            } else if (at) {
-                /* An array stores its elements inline, so the element type must be complete. */
-                collect_deps(ty_elem(at), &deps);
             } else if (mt) {
-                /* A map stores keys and values inline, and hands back arrays of both. */
-                collect_deps(ty_key(mt), &deps);
+                collect_deps(ty_key(mt), &deps);      /* slots hold both inline */
                 collect_deps(ty_val(mt), &deps);
-                collect_deps(ty_array(ty_key(mt)), &deps);
-                collect_deps(ty_array(ty_val(mt)), &deps);
-            } else {
-                /* A closure typedef only mentions its parameter and result types. */
+            } else if (ft) {
                 for (int j = 0; j < ft->args.count; j++)
                     collect_deps(VEC_PTR(&ft->args, j, Type), &deps);
+            } else {
+                collect_deps(ty_elem(tt), &deps);     /* the task holds its result */
             }
+
             bool ready = true;
             for (int j = 0; j < deps.count && ready; j++) {
                 char *dep = VEC_PTR(&deps, j, char);
-                if (strcmp(dep, mangled) == 0) {
-                    fail(0, "type '%s' contains itself by value — recursive types need indirection, "
-                            "which Klang does not have yet", mangled);
-                }
+                if (strcmp(dep, mangled) == 0)
+                    fail(0, "type %s contains itself by value — put the recursive part "
+                            "behind an array, as in [%s], which is a reference",
+                         shown, shown);
                 bool found = false;
-                for (int k = 0; k < emitted.count; k++)
-                    if (strcmp(VEC_PTR(&emitted, k, char), dep) == 0) { found = true; break; }
+                for (int q = 0; q < emitted.count; q++)
+                    if (strcmp(VEC_PTR(&emitted, q, char), dep) == 0) { found = true; break; }
                 if (!found) ready = false;
             }
             if (!ready) continue;
 
             if (sd) emit_struct(sd, sb);
             else if (ed) emit_enum(ed, sb);
-            else if (at) emit_array(at, sb);
-            else if (mt) emit_map(mt, sb);
-            else emit_fntype(ft, sb);
+            else if (mt) emit_map_def(mt, sb);
+            else if (ft) emit_fntype(ft, sb);
+            else emit_task(tt, sb);
             VEC_PUSH_PTR(&emitted, (char *)mangled);
             done[i] = true;
             progress = true;
@@ -4657,17 +4722,24 @@ static void emit_types(SB *sb) {
     }
     for (int i = 0; i < total; i++) {
         if (done[i]) continue;
-        const char *m = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl)->mangled
-                      : i < n_s + n_e ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl)->mangled
-                      : i < n_s + n_e + n_a
-                          ? ty_mangle(VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type))
-                      : i < n_s + n_e + n_a + n_m
-                          ? ty_mangle(VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type))
-                          : ty_mangle(VEC_PTR(&g_mono_fntypes, i - n_s - n_e - n_a - n_m, Type));
-        fail(0, "type '%s' is part of a cycle — recursive types need indirection, "
-                "which Klang does not have yet", m);
+        int k = i;
+        const char *m = k < n_s ? VEC_PTR(&g_mono_structs, k, StructDecl)->mangled
+                      : (k -= n_s) < n_e ? VEC_PTR(&g_mono_enums, k, EnumDecl)->mangled
+                      : (k -= n_e) < n_m ? ty_mangle(VEC_PTR(&g_mono_maps, k, Type))
+                      : (k -= n_m) < n_f ? ty_mangle(VEC_PTR(&g_mono_fntypes, k, Type))
+                                         : ty_mangle(VEC_PTR(&g_mono_tasks, k - n_f, Type));
+        fail(0, "type '%s' is part of a by-value cycle — put one step of it behind an "
+                "array, which is a reference", m);
     }
     free(done);
+
+    /* Array layouts need only names, so they can all go out together. */
+    for (int i = 0; i < n_a; i++) emit_array_def(VEC_PTR(&g_mono_arrays, i, Type), sb);
+    sb_append(sb, "\n");
+
+    /* ── 3. functions ── */
+    for (int i = 0; i < n_a; i++) emit_array(VEC_PTR(&g_mono_arrays, i, Type), sb);
+    for (int i = 0; i < n_m; i++) emit_map(VEC_PTR(&g_mono_maps, i, Type), sb);
 }
 
 /* ── lambda lifting ───────────────────────────────────────────────────────
@@ -4764,7 +4836,7 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.12 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.13 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -4817,8 +4889,6 @@ static void codegen(SB *sb) {
         for (int i = 0; i < g_mono_enums.count; i++)
             emit_enum_copy(VEC_PTR(&g_mono_enums, i, EnumDecl), sb);
         sb_append(sb, "\n");
-        for (int i = 0; i < g_mono_tasks.count; i++)
-            emit_task(VEC_PTR(&g_mono_tasks, i, Type), sb);
     }
 
     /* Constants are globals, declared here so that anything emitted later — a
@@ -5067,7 +5137,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.12)\n\n"
+        printf("klangc — Klang compiler (0.13)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -5075,7 +5145,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.12.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.13.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";

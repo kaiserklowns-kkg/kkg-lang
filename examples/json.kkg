@@ -1,0 +1,119 @@
+// Phase 12: recursive types, and the JSON library they make possible.
+//
+// `enum Json { ... Arr([Json]) }` is not a cycle: an array is a reference, so the
+// recursion goes through a pointer. That one change is what lets a Klang program
+// describe a tree — a JSON document, an AST, a filesystem — at all.
+
+import "std/json"
+import "std/list"
+import "std/string" as str
+
+// A recursive struct works the same way.
+struct Dir {
+    name: string,
+    files: [string],
+    subdirs: [Dir],
+}
+
+fn countFiles(d: Dir) -> int {
+    let mut n = d.files.len()
+    for sub in d.subdirs {
+        n += countFiles(sub)
+    }
+    return n
+}
+
+fn deepest(d: Dir) -> int {
+    let mut best = 0
+    for sub in d.subdirs {
+        let k = deepest(sub)
+        if k > best {
+            best = k
+        }
+    }
+    return best + 1
+}
+
+fn main() {
+    // ── building a document ───────────────────────────────────────────
+    let doc = Obj([
+        json.field("name", Str("klang")),
+        json.field("version", json.numOf(12)),
+        json.field("safe", Bool(true)),
+        json.field("wasm", Null),
+        json.field("tags", Arr([Str("fast"), Str("safe"), Str("small")])),
+        json.field("author", Obj([
+            json.field("handle", Str("kaiserklowns")),
+        ])),
+    ])
+    println("built   = ${json.stringify(doc)}")
+
+    // ── reading one back ──────────────────────────────────────────────
+    let text = "{\"id\":7,\"title\":\"hello\",\"parts\":[1,2,3],\"meta\":{\"ok\":true}}"
+    match json.parse(text) {
+        Err(e) => println("parse failed: ${e}")
+        Ok(v) => {
+            println("parsed  = ${json.stringify(v)}")
+            match json.lookup(v, "title") {
+                Some(t) => println("title   = ${asText(t)}")
+                None    => println("title   = (missing)")
+            }
+            match json.lookup(v, "parts") {
+                Some(p) => println("parts   = ${json.items(p).len()} items")
+                None    => println("parts   = (missing)")
+            }
+            match json.lookup(v, "nothere") {
+                Some(_x) => println("unexpected")
+                None     => println("nothere = absent, as it should be")
+            }
+        }
+    }
+
+    // ── a round trip is exact ─────────────────────────────────────────
+    match json.parse(text) {
+        Err(e) => println("round trip failed: ${e}")
+        Ok(v)  => {
+            let again = json.stringify(v)
+            match json.parse(again) {
+                Err(e2) => println("second parse failed: ${e2}")
+                Ok(v2)  => {
+                    assert(json.stringify(v2) == again, "a round trip must be stable")
+                    println("stable  = yes")
+                }
+            }
+        }
+    }
+
+    // ── bad input is a value, with a position ─────────────────────────
+    for bad in ["{", "[1,]", "{\"a\" 1}", "nope"] {
+        match json.parse(bad) {
+            Ok(_v) => println("bad     = '${bad}' unexpectedly parsed")
+            Err(e) => println("bad     = '${bad}' -> ${e}")
+        }
+    }
+
+    // ── a recursive struct ────────────────────────────────────────────
+    let tree = Dir {
+        name: "src",
+        files: ["klangc.c"],
+        subdirs: [
+            Dir { name: "std", files: ["math.kkg", "list.kkg", "json.kkg"], subdirs: [] },
+            Dir { name: "examples", files: ["hello.kkg"], subdirs: [
+                Dir { name: "deep", files: ["a.kkg", "b.kkg"], subdirs: [] },
+            ] },
+        ],
+    }
+    println("files   = ${countFiles(tree)}")
+    println("depth   = ${deepest(tree)}")
+    assert(countFiles(tree) == 7, "recursive walk must reach every file")
+    assert(deepest(tree) == 3, "recursive depth must be right")
+
+    println("json: ok")
+}
+
+fn asText(j: json.Json) -> string {
+    return match json.asString(j) {
+        Some(s) => s,
+        None    => "(not a string)",
+    }
+}

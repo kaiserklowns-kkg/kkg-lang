@@ -1,0 +1,4 @@
+enum Chain { End, Link(Chain) }
+fn main() {
+    println("${match End { End => 1, Link(_c) => 2 }}")
+}
