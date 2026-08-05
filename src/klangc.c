@@ -6237,6 +6237,24 @@ static char *stem_of(const char *path) {
  * The rule here is narrow on purpose: an input.css that mentions Tailwind gets the
  * Tailwind CLI run over it. Anything else is left alone, because guessing at
  * someone's build tool is worse than not having one. */
+/* Looks for `name` here, then in each parent. Node resolution works this way and
+   so must this: a project's package.json sits at its root, and `web build` is
+   just as likely to be run from a subdirectory as from there. Returns the
+   directory that has it — "." for here — or NULL. */
+static const char *find_up(const char *name) {
+    static char dir[1100];
+    char probe[1200];
+    snprintf(dir, sizeof dir, ".");
+    for (int up = 0; up < 8; up++) {
+        snprintf(probe, sizeof probe, "%s/%s", dir, name);
+        if (file_exists(probe)) return dir;
+        size_t n = strlen(dir);
+        if (n + 4 >= sizeof dir) break;
+        memcpy(dir + n, "/..", 4);
+    }
+    return NULL;
+}
+
 static int build_css(const char *root, bool minify) {
     char in[1100];
     snprintf(in, sizeof in, "%s/input.css", root);
@@ -6257,15 +6275,17 @@ static int build_css(const char *root, bool minify) {
     /* `@import \"tailwindcss\"` is resolved from the project, not from the CLI, so
        the package has to actually be installed. Doing it here rather than leaving
        an error for the reader is the point of `web run` existing. */
-    if (!file_exists("node_modules/tailwindcss/package.json")) {
-        if (!file_exists("package.json")) {
+    if (!find_up("node_modules/tailwindcss/package.json")) {
+        const char *pkg = find_up("package.json");
+        if (!pkg) {
             fprintf(stderr,
-                "klangc: '%s' wants Tailwind, but there is no package.json to install it from\n"
-                "       | help: `klangc new <name>` writes one, or add\n"
-                "       |       tailwindcss and @tailwindcss/cli as devDependencies yourself\n", in);
+                "klangc: '%s' wants Tailwind, but there is no package.json here or in any\n"
+                "        directory above to install it from\n"
+                "       | help: `klangc new <name>` writes one, or add tailwindcss and\n"
+                "       |       @tailwindcss/cli as devDependencies yourself\n", in);
             return 1;
         }
-        snprintf(cmd, sizeof cmd, bun ? "bun install" : "npm install");
+        snprintf(cmd, sizeof cmd, "cd %s && %s install", pkg, bun ? "bun" : "npm");
         printf("klangc: %s   (Tailwind is not installed yet)\n", cmd);
         if (system(cmd) != 0) {
             fprintf(stderr, "klangc: installing Tailwind failed\n");
