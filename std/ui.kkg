@@ -287,6 +287,44 @@ pub fn refresh() {
     }
 }
 
+// ── routing ───────────────────────────────────────────────────────────
+//
+// The address bar is state like any other: read it in the view, and re-render
+// when it changes.
+
+let mut routeHandlers: [fn(string)] = []
+
+// The part after the '#', without the '#'. "" on a bare URL.
+pub fn route() -> string {
+    let h = dom.hash()
+    if h.startsWith("#") {
+        return h.substr(1, h.len())
+    }
+    return h
+}
+
+pub fn goTo(path: string) {
+    dom.setHash(path)
+}
+
+// Runs `run` whenever the route changes, and once now, so the first paint is
+// already on the right page. Re-rendering afterwards is up to the handler, which
+// usually just sets state and calls `refresh`.
+pub fn onRoute(run: fn(string)) {
+    if routeHandlers.len() == 0 {
+        dom.onHashChange("klangUiRouted")
+    }
+    push(routeHandlers, run)
+    run(route())
+}
+
+export fn klangUiRouted() {
+    let now = route()
+    for h in routeHandlers {
+        h(now)
+    }
+}
+
 // The value of an input, by selector, for the cases a handler does not cover.
 pub fn valueOf(sel: string) -> string {
     dom.nodeTable()

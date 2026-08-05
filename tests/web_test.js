@@ -1,10 +1,16 @@
-// Runs examples/web.kkg headlessly, so "Klang can write a web page on its own" is
-// checked by `make check` rather than asserted in a README.
+// examples/web.kkg driven headlessly, so "Klang can write a web application on
+// its own" is checked by `make check` rather than asserted in a README.
 //
-// The page is built by Klang as std/html values, so the stub here parses the
-// markup it produces into a real tree — elements, attributes, data-*, parents.
-// That is what makes the interesting parts testable: delegation has to find the
-// right element, and escaping has to have happened.
+// The stub parses the markup std/ui produces into a real tree — elements,
+// attributes, parents — and supports the operations a diff performs, because the
+// two things worth testing here are invisible in the output:
+//
+//   * re-rendering patches the DOM rather than replacing it, so a live <input>
+//     keeps both its identity and what is being typed into it, and
+//   * keys mean deleting from the middle of a list moves nothing else.
+//
+// Both are obvious to anyone using the page and impossible to see in a snapshot,
+// which is why they are checked by element identity.
 //
 //   node tests/web_test.js path/to/app.js
 
@@ -39,9 +45,10 @@ console.warn = (...a) => logs.push("WARN " + a.join(" "));
 // ── assertions ─────────────────────────────────────────────────────────
 
 let failures = 0;
+const show = (v) => (v && v.tag !== undefined ? `<${v.tag}>#${v.uid}` : JSON.stringify(v));
 const fail = (m) => { failures++; realLog("  FAIL " + m); };
 function check(what, got, want) {
-  if (got !== want) fail(`${what}\n       got:  ${JSON.stringify(got)}\n       want: ${JSON.stringify(want)}`);
+  if (got !== want) fail(`${what}\n       got ${show(got)}\n       exp ${show(want)}`);
 }
 function contains(what, hay, needle) {
   if (!hay.includes(needle)) fail(`${what}\n       ${JSON.stringify(hay)}\n       lacks ${JSON.stringify(needle)}`);
@@ -50,99 +57,114 @@ function absent(what, hay, needle) {
   if (hay.includes(needle)) fail(`${what}: ${JSON.stringify(needle)} should not be there`);
 }
 
+// Stable ids, so a failure can say which element it actually got.
+let uid = 0;
+const stamp = () => { for (const n of app.walk()) if (n.uid === undefined) n.uid = ++uid; };
+
+const rows = () => all().filter((n) => n.tag === "li");
 const type = (t) => { q("#entry").value = t; };
 const submitForm = () => app.fire("submit", all().find((n) => n.tag === "form"));
-// `html.arg(v)` renders as data-arg, which is what the delegated listener reads.
-const rowButton = (kind, id) =>
-  all().find((n) => n.classes.has(kind) && n.dataset.arg === String(id));
-const clickRow = (kind, id) => app.fire("click", rowButton(kind, id));
-const clickText = (t) => app.fire("click", byText("button", t));
+const click = (label) => app.fire("click", byText("button", label));
+const clickIn = (row, label) =>
+  app.fire("click", row.children.find((c) => c.textContent.trim() === label));
+const status = () => all().find((n) => n.classes.has("status")).textContent;
 
 const Module = require(path);
 
 setTimeout(async () => {
   console.log = realLog;
+  stamp();
 
   // ── the page came from Klang, not from a file ───────────────────────
-  check("the shell mounted", q("#listbox") !== null, true);
-  check("the form is Klang-built", [...app.walk()].some((n) => n.tag === "form"), true);
-  check("the heading is Klang-built", q("h1") === null, false);
+  check("a heading exists", q("h1") !== null, true);
   check("heading text", q("h1").textContent, "Klang in the browser");
+  check("the form is Klang-built", all().some((n) => n.tag === "form"), true);
   check("the input exists", q("#entry") !== null, true);
   contains("main logged", logs.join("\n"), "klang: ready, 3 tasks");
 
-  // ── the stylesheet came from Klang too, not from a .css file ────────
+  // ── the stylesheet is Klang too ─────────────────────────────────────
   const sheet = styleText();
-  check("a stylesheet was installed", sheet.length > 0, true);
   contains("a plain rule", sheet, "max-width:34rem;");
   contains("a pseudo-class", sheet, "button:hover {");
   contains("a media query", sheet, "@media (max-width: 30rem) {");
-  check("only one style element", document.head.children.length, 1);
+  check("one style element", document.head.children.length, 1);
 
-  // ── first load: seeded, rendered, titled ────────────────────────────
-  contains("initial render", q("#list").textContent, "write a language");
-  contains("initial count", q("#status").textContent, "1 of 3 left");
+  // ── first load ──────────────────────────────────────────────────────
+  check("three rows", rows().length, 3);
+  contains("seeded", rows()[0].textContent, "write a language");
+  contains("count", status(), "1 of 3 left");
   check("remaining()", Module._remaining(), 1);
-  check("document.title", document.title, "Klang — 1 left");
-  check("all filter is on", q("#filters").children[0].classes.has("on"), true);
+  check("title", document.title, "Klang in the browser");
 
-  // ── the form, reached by delegation ─────────────────────────────────
+  // ── the diff leaves a live input alone ──────────────────────────────
+  const entry = q("#entry");
+  entry.value = "half typed";
+  const firstRow = rows()[0];
+  clickIn(rows()[2], "☐");                       // toggle the third task
+  stamp();
+  check("the input is the same element", q("#entry"), entry);
+  check("what was typed survived", q("#entry").value, "half typed");
+  check("row 1 was patched, not replaced", rows()[0], firstRow);
+  check("toggled", Module._remaining(), 0);
+  clickIn(rows()[2], "☑");
+  check("toggled back", Module._remaining(), 1);
+
+  // ── keys: deleting from the middle moves nothing else ───────────────
+  const before = rows();
+  const last = before[2];
+  clickIn(before[0], "×");
+  stamp();
+  check("two rows left", rows().length, 2);
+  check("the survivor is the same element", rows()[1], last);
+  absent("row 1 gone", q("ul").textContent, "write a language");
+
+  // ── the form, and a closure handler on submit ───────────────────────
   type("  ship it  ");
   submitForm();
-  check("added", Module._remaining(), 2);
-  contains("count after add", q("#status").textContent, "2 of 4 left");
+  stamp();
+  check("added, and trimmed", rows().length, 3);
+  contains("new row", rows()[2].textContent, "ship it");
   check("entry cleared", q("#entry").value, "");
-  check("focus returned to the box", q("#entry").focused, true);
-  contains("new row", q("#list").textContent, "ship it");
+  check("focus returned", q("#entry").focused, true);
 
   type("   ");
   submitForm();
-  check("blank refused", Module._remaining(), 2);
-  contains("blank message", q("#status").textContent, "type something first");
+  check("blank refused", rows().length, 3);
+  contains("blank message", status(), "type something first");
 
-  // ── escaping is structural: a text node cannot inject markup ────────
+  // ── escaping is structural ──────────────────────────────────────────
   type("<script>alert(1)</script>");
   submitForm();
-  contains("escaped in the markup", q("#listbox").innerHTML, "&lt;script&gt;");
-  absent("no raw tag reached the DOM", q("#listbox").innerHTML, "<script>");
-  check("and it is one text node, not an element",
-        [...app.walk()].some((n) => n.tag === "script"), false);
-
-  // ── delegation: the handler travels with the element ────────────────
-  clickRow("toggle", 3);
-  check("toggled 3 done", Module._remaining(), 2);
-  clickRow("toggle", 3);
-  check("toggled 3 back", Module._remaining(), 3);
-
-  clickRow("delete", 1);
-  absent("row 1 gone", q("#list").textContent, "write a language");
-  contains("count after delete", q("#status").textContent, "3 of 4 left");
+  stamp();
+  check("no script element was created", all().some((n) => n.tag === "script"), false);
+  contains("it arrived as text", q("ul").textContent, "<script>alert(1)</script>");
 
   // ── keyboard ────────────────────────────────────────────────────────
-  type("half typed");
-  q("#entry").listeners.keydown[0]({ target: q("#entry"), key: "Escape" });
+  // Delegated like every other event: one listener on the mount point, and the
+  // input carries the handler index.
+  type("half typed again");
+  for (const fn of app.listeners.keydown || []) {
+    fn({ target: q("#entry"), key: "Escape", preventDefault() {} });
+  }
   check("escape cleared the box", q("#entry").value, "");
 
-  // ── hash routing ────────────────────────────────────────────────────
+  // ── routing ─────────────────────────────────────────────────────────
   navigate("#done");
-  check("done filter on", q("#filters").children[2].classes.has("on"), true);
-  check("all filter off", q("#filters").children[0].classes.has("on"), false);
-  contains("only done shown", q("#list").textContent, "give it a garbage collector");
-  absent("todo hidden", q("#list").textContent, "ship it");
-
+  stamp();
+  contains("only done shown", q("ul").textContent, "give it a garbage collector");
+  absent("todo hidden", q("ul").textContent, "ship it");
   navigate("#todo");
-  contains("todo shown", q("#list").textContent, "ship it");
-  absent("done hidden", q("#list").textContent, "give it a garbage collector");
-
+  contains("todo shown", q("ul").textContent, "ship it");
+  absent("done hidden", q("ul").textContent, "give it a garbage collector");
   navigate("");
-  check("back to all", q("#filters").children[0].classes.has("on"), true);
+  check("back to all", rows().length, 4);
 
-  // ── buttons that Klang mounted after the listener was installed ─────
-  clickText("clear done");
-  contains("clear message", q("#status").textContent, "cleared 1");
-  contains("all remaining are todo", q("#status").textContent, "3 of 3 left");
-  clickText("clear done");
-  contains("nothing left to clear", q("#status").textContent, "nothing to clear");
+  // ── clear done ──────────────────────────────────────────────────────
+  click("clear done");
+  stamp();
+  contains("cleared", status(), "cleared 1");
+  click("clear done");
+  contains("nothing left to clear", status(), "nothing to clear");
 
   // ── it persisted, as JSON written by std/json ───────────────────────
   const saved = store.get("klang.tasks");
@@ -155,43 +177,43 @@ setTimeout(async () => {
   }
 
   // ── the network, and every way it can go wrong ──────────────────────
-  clickText("sync");
-  contains("says it is working", q("#status").textContent, "syncing");
+  click("sync");
+  contains("says it is working", status(), "syncing");
   check("posted", lastRequest.init.method, "POST");
   check("to the right place", lastRequest.url, "/api/tasks");
   check("as json", lastRequest.init.headers["Content-Type"], "application/json");
   check("body is the task list", JSON.parse(lastRequest.init.body).length, 3);
   await settle();
-  contains("reply reached Klang", q("#status").textContent, "synced 3");
+  contains("reply reached Klang", status(), "synced 3");
 
   reply = { ok: false, status: 503, statusText: "Service Unavailable", body: "" };
-  clickText("sync");
+  click("sync");
   await settle();
-  contains("a bad status is a failure", q("#status").textContent, "503 Service Unavailable");
+  contains("a bad status is a failure", status(), "503 Service Unavailable");
 
   reply = { throws: "network down" };
-  clickText("sync");
+  click("sync");
   await settle();
-  contains("a thrown request is a failure", q("#status").textContent, "network down");
+  contains("a thrown request is a failure", status(), "network down");
 
   reply = { ok: true, status: 200, statusText: "OK", body: "not json at all" };
-  clickText("sync");
+  click("sync");
   await settle();
-  contains("garbage reply is handled", q("#status").textContent, "something odd");
+  contains("garbage reply is handled", status(), "something odd");
 
   // ── churn, so a collection certainly runs through the middle ────────
   for (let i = 0; i < 400; i++) {
     type("task number " + i + " with a reasonably long title");
     submitForm();
   }
-  check("after 400 adds", Module._remaining(), 403);
-  contains("last one intact", q("#list").textContent, "task number 399 with a reasonably long title");
-  contains("first one intact", q("#list").textContent, "ship it");
+  check("after 400 adds", rows().length, 403);
+  contains("last one intact", q("ul").textContent, "task number 399 with a reasonably long title");
+  contains("first one intact", q("ul").textContent, "ship it");
   check("storage survived too", JSON.parse(store.get("klang.tasks")).length, 403);
 
   if (failures) {
     realLog(`web: ${failures} check(s) failed`);
     process.exit(1);
   }
-  realLog("web: page built in Klang — markup, delegation, routing, storage, network — 403 tasks, all ok");
+  realLog("web: components, closures, a diff that keeps inputs and keys that keep rows — 403 tasks, all ok");
 }, 200);

@@ -8,12 +8,9 @@
 // have to be a JavaScript object living outside Klang's heap, which the collector
 // could neither see nor free; a selector is a string, and strings cross cleanly.
 //
-// Callbacks are named by string, for the same reason: a Klang closure lives in
-// Klang's heap and JavaScript has no way to keep it alive or to know when it is
-// done with it. A handler is an `export fn`, which is a plain symbol.
+// Callbacks do not live here. std/ui holds them as Klang closures and passes an// index across, which is why nothing in this file takes a handler.
 
 import "std/string" as str
-import "std/html"
 
 // ── reading the document ──────────────────────────────────────────────
 
@@ -219,81 +216,7 @@ js fn jsUiListen(root: int, event: string) {
     })
 }
 
-// ── events ────────────────────────────────────────────────────────────
-//
-// Four shapes, because a handler usually needs to know something about what
-// happened. Each passes exactly one thing, typed, rather than an event object
-// that could not cross the boundary anyway.
-
-js fn jsOn(sel: string, event: string, handler: string) {
-    var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener(event, function() { Module["_" + handler]() })
-}
-
-// The value of whatever was interacted with: an input's text, a checkbox's
-// "true" or "".
-js fn jsOnValue(sel: string, event: string, handler: string) {
-    var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener(event, function(ev) {
-        var t = ev.target
-        var v = t.type === "checkbox" ? (t.checked ? "true" : "")
-              : String(t.value === undefined ? "" : t.value)
-        Module.ccall(handler, null, ["string"], [v])
-    })
-}
-
-js fn jsOnKey(sel: string, event: string, handler: string) {
-    var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener(event, function(ev) {
-        Module.ccall(handler, null, ["string"], [String(ev.key)])
-    })
-}
-
-// Delegation: one listener on a container, told which child was hit. That is how
-// a list of a thousand rows gets one handler instead of a thousand.
-js fn jsOnChild(sel: string, event: string, childSel: string, handler: string) {
-    var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener(event, function(ev) {
-        var hit = ev.target.closest(childSel)
-        if (hit === null || !el.contains(hit)) return
-        Module.ccall(handler, null, ["string"], [String(hit.dataset.id || hit.id || "")])
-    })
-}
-
-// A form submit that does not reload the page, which is almost always what is
-// wanted and is easy to forget.
-js fn jsOnSubmit(sel: string, handler: string) {
-    var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener("submit", function(ev) {
-        ev.preventDefault()
-        Module["_" + handler]()
-    })
-}
-
-// One listener for everything std/html built. It looks for `data-on-<event>` on
-// the element or an ancestor, and calls the export it names — passing `data-arg`
-// when there is one. So a button carries its own handler and needs no id, no
-// selector, and no matching line in main.
-js fn jsDelegate(sel: string, event: string) {
-    var root = document.querySelector(sel)
-    if (root === null) return
-    var key = "data-on-" + event
-    root.addEventListener(event, function(ev) {
-        var el = ev.target.closest("[" + key + "]")
-        if (el === null || !root.contains(el)) return
-        // A submit that reloads the page is never what was meant.
-        if (event === "submit") ev.preventDefault()
-        var handler = el.getAttribute(key)
-        var a = el.getAttribute("data-arg")
-        if (a === null) Module["_" + handler]()
-        else Module.ccall(handler, null, ["string"], [a])
-    })
-}
+// ── styling, and the address bar ──────────────────────────────────────
 
 // A stylesheet built by std/css, put on the page. Called again with the same id
 // it replaces what was there, so a theme can change without piling up <style>
@@ -407,22 +330,9 @@ pub fn focus(sel: string) { unsafe { jsFocus(sel) } }
 
 // `handler` names an `export fn`. `on` and `onSubmit` want one taking nothing;
 // `onValue`, `onKey` and `onChild` want one taking a single string.
-pub fn on(sel: string, event: string, handler: string) { unsafe { jsOn(sel, event, handler) } }
-pub fn onValue(sel: string, event: string, handler: string) { unsafe { jsOnValue(sel, event, handler) } }
-pub fn onKey(sel: string, event: string, handler: string) { unsafe { jsOnKey(sel, event, handler) } }
-pub fn onChild(sel: string, event: string, childSel: string, handler: string) {
-    unsafe { jsOnChild(sel, event, childSel, handler) }
-}
-pub fn onSubmit(sel: string, handler: string) { unsafe { jsOnSubmit(sel, handler) } }
 pub fn onHashChange(handler: string) { unsafe { jsOnHash(handler) } }
 
-// ── mounting what std/html built ──────────────────────────────────────
-
-// Replaces the contents of `sel` with a tree of nodes.
-pub fn mount(sel: string, node: html.Node) { setHtml(sel, html.render(node)) }
-
 // The same, for a list of siblings going into a container that already exists.
-pub fn mountAll(sel: string, nodes: [html.Node]) { setHtml(sel, html.renderAll(nodes)) }
 
 // Put a stylesheet on the page — normally `css.sheet([...])`. There is no .css
 // file in the project unless you want one.
@@ -452,7 +362,6 @@ pub fn uiListen(root: int, event: string) { unsafe { jsUiListen(root, event) } }
 // Install one listener under `sel` for every `html.on(event, ...)` inside it.
 // Called once; it keeps working for everything mounted afterwards, because the
 // listener is on the container rather than on the elements.
-pub fn delegate(sel: string, event: string) { unsafe { jsDelegate(sel, event) } }
 
 pub fn after(ms: int, handler: string) -> int { return unsafe { jsAfter(ms, handler) } }
 pub fn every(ms: int, handler: string) -> int { return unsafe { jsEvery(ms, handler) } }

@@ -1,14 +1,15 @@
 // A web application written entirely in Klang.
 //
-// There is no .html file and no .css file. Everything you see — the heading, the
-// form, the filters, the list, every button, and all the styling — is built here
-// as values. klangc writes the page shell at build time: a div and a script tag.
+// There is no .html file and no .css file. The markup is std/ui, the styling is
+// std/css, and klangc writes the page shell at build time. Handlers are closures;
+// changing state and calling `ui.refresh()` patches the DOM rather than rebuilding
+// it, so what you are typing into the box survives every re-render.
 //
 //     klangc web run examples/web.kkg
 
-import "std/dom"
-import "std/html"
+import "std/ui"
 import "std/css"
+import "std/dom"
 import "std/fetch"
 import "std/list"
 import "std/json"
@@ -20,8 +21,8 @@ struct Task {
     done: bool,
 }
 
-// A handler runs long after main returned and cannot capture a local, so the
-// page's state lives at module level. `let mut` says it changes.
+// State is ordinary Klang. It lives at module level because a handler runs long
+// after main returned and cannot capture a local.
 let mut tasks: [Task] = []
 let mut nextId = 1
 let mut filter = "all"
@@ -29,99 +30,19 @@ let mut message = ""
 
 const STORE_KEY = "klang.tasks"
 
-// ── styling ───────────────────────────────────────────────────────────
-//
-// A stylesheet is a Klang value too. The property names are functions, so a
-// misspelling is a compile error rather than a rule the browser quietly drops.
-
-fn styles() -> [css.Block] {
-    return [
-        css.rule(":root", [css.colorScheme("light dark")]),
-        css.rule("body", [
-            css.font("16px/1.5 system-ui, sans-serif"),
-            css.maxWidth("34rem"),
-            css.margin("3rem auto"),
-            css.padding("0 1rem"),
-        ]),
-        css.rule("h1", [css.fontSize("1.4rem"), css.marginBottom(".2rem")]),
-        css.rule(".sub", [css.marginTop("0"), css.opacity(".7"), css.fontSize(".9rem")]),
-
-        css.rule("form", [css.display("flex"), css.gap(".5rem"), css.margin("1.2rem 0 .8rem")]),
-        css.rule("input", [
-            css.flex("1"),
-            css.padding(".5rem .7rem"),
-            css.border("1px solid #8886"),
-            css.radius(".4rem"),
-            css.background("transparent"),
-            css.color("inherit"),
-            css.font("inherit"),
-        ]),
-        css.rule("button", [
-            css.padding(".5rem .9rem"),
-            css.border("1px solid #8886"),
-            css.radius(".4rem"),
-            css.background("transparent"),
-            css.color("inherit"),
-            css.font("inherit"),
-            css.cursor("pointer"),
-        ]),
-        css.rule("button:hover", [css.background("#8882")]),
-
-        css.rule("nav", [css.display("flex"), css.gap(".4rem"),
-                         css.fontSize(".85rem"), css.marginBottom(".8rem")]),
-        css.rule("nav a", [css.padding(".2rem .6rem"), css.radius(".3rem"),
-                           css.textDecoration("none"), css.color("inherit"),
-                           css.opacity(".6")]),
-        css.rule("nav a.on", [css.opacity("1"), css.background("#8883")]),
-
-        css.rule("ul", [css.listStyle("none"), css.padding("0"), css.margin("0"),
-                        css.border("1px solid #8884"), css.radius(".5rem")]),
-        css.rule("li", [css.display("flex"), css.align("center"), css.gap(".6rem"),
-                        css.padding(".45rem .6rem"), css.borderBottom("1px solid #8882")]),
-        css.rule("li:last-child", [css.borderBottom("0")]),
-        css.rule("li span", [css.flex("1")]),
-        css.rule("li.done span", [css.opacity(".45"), css.textDecoration("line-through")]),
-        css.rule("li.empty", [css.opacity(".5"), css.fontStyle("italic"),
-                              css.justify("center")]),
-        css.rule("li button", [css.border("0"), css.padding(".15rem .45rem"),
-                               css.fontSize("1rem"), css.opacity(".6")]),
-        css.rule("li button:hover", [css.opacity("1")]),
-
-        css.rule(".status", [css.display("flex"), css.justify("space-between"),
-                             css.align("center"), css.gap(".5rem"),
-                             css.fontSize(".85rem"), css.opacity(".75"),
-                             css.marginTop(".8rem")]),
-        css.rule(".status .message", [css.flex("1"), css.textAlign("center")]),
-        css.rule(".status button", [css.padding(".3rem .6rem")]),
-
-        css.rule(".sr-only", [css.position("absolute"), css.width("1px"),
-                              css.height("1px"), css.overflow("hidden")]),
-
-        css.media("(max-width: 30rem)", [
-            css.rule("body", [css.margin("1.5rem auto")]),
-            css.rule("h1", [css.fontSize("1.2rem")]),
-        ]),
-    ]
-}
-
 // ── the page ──────────────────────────────────────────────────────────
-//
-// `html.on(event, "handlerName")` attaches the handler where the element is
-// built, so nothing here needs an id in order to be clickable, and there is no
-// second list of wiring in main to keep in step.
 
-fn taskRow(t: Task) -> html.Node {
-    let mark = if t.done { "☑" } else { "☐" }
-    return html.li([html.class(if t.done { "task done" } else { "task" })], [
-        html.button([html.class("toggle"), html.title("toggle"),
-                     html.on("click", "toggleTask"), html.arg("${t.id}")],
-                    [html.text(mark)]),
-        // A text node is escaped when it is rendered. There is no way to forget.
-        html.span([], [html.text(t.title)]),
-        html.button([html.class("delete"), html.title("delete"),
-                     html.on("click", "deleteTask"), html.arg("${t.id}")],
-                    [html.text("×")]),
-    ])
+fn taskRow(t: Task) -> ui.Node {
+    // A key tells the diff which row is which, so deleting from the middle of the
+    // list moves nothing else.
+    return ui.keyed(ui.with(ui.item([
+        ui.with(ui.button(if t.done { "☑" } else { "☐" }, || toggle(t.id)),
+                [ui.class("mark"), ui.title("toggle")]),
+        // A text node is escaped on the way in. There is no way to forget.
+        ui.tag("span", t.title),
+        ui.with(ui.button("×", || removeTask(t.id)),
+                [ui.class("delete"), ui.title("delete")]),
+    ]), [ui.class(if t.done { "task done" } else { "task" })]), "${t.id}")
 }
 
 fn visible() -> [Task] {
@@ -134,69 +55,136 @@ fn visible() -> [Task] {
     return tasks
 }
 
-fn listView() -> html.Node {
+fn filterLink(name: string, label: string) -> ui.Node {
+    let target = if name == "all" { "#" } else { "#${name}" }
+    return ui.with(ui.link(label, target),
+                   [ui.class(if filter == name { "on" } else { "" })])
+}
+
+fn listView() -> ui.Node {
     let shown = visible()
     if shown.len() == 0 {
-        return html.ul([html.id("list")], [
-            html.li([html.class("empty")], [html.text("nothing here")]),
-        ])
+        return ui.list([ui.with(ui.item([ui.text("nothing here")]), [ui.class("empty")])])
     }
-    return html.ul([html.id("list")], list.map(shown, taskRow))
+    return ui.list(list.map(shown, taskRow))
 }
 
-fn filterLink(nameOf: string, label: string, target: string) -> html.Node {
-    let cls = if filter == nameOf { "on" } else { "" }
-    return html.a([html.href(target), html.class(cls)], [html.text(label)])
-}
-
-fn statusView() -> html.Node {
+fn view() -> ui.Node {
     let left = list.count(tasks, |t| !t.done)
-    return html.div([html.id("status"), html.class("status")], [
-        html.span([], [html.text("${left} of ${tasks.len()} left")]),
-        html.span([html.class("message")], [html.text(message)]),
-        html.span([], [
-            html.button([html.on("click", "sync")], [html.text("sync")]),
-            html.button([html.on("click", "clearDone")], [html.text("clear done")]),
-        ]),
+    return ui.col([
+        ui.h1("Klang in the browser"),
+        ui.with(ui.line("Markup, styling, state, routing and the network are "
+                      + "examples/web.kkg — Klang values, compiled to WebAssembly."),
+                [ui.class("sub")]),
+
+        ui.onSubmit(ui.form([
+            ui.onKey(ui.input([ui.id("entry"),
+                               ui.placeholder("something to do — esc to clear"),
+                               ui.attr("autocomplete", "off")]),
+                     |key| { if key == "Escape" { clearEntry() } }),
+            ui.tag("button", "add"),
+        ]), addTask),
+
+        ui.nav([filterLink("all", "all"), filterLink("todo", "todo"),
+                filterLink("done", "done")]),
+
+        listView(),
+
+        ui.with(ui.div([
+            ui.tag("span", "${left} of ${tasks.len()} left"),
+            ui.with(ui.tag("span", message), [ui.class("message")]),
+            ui.span([
+                ui.button("sync", sync),
+                ui.button("clear done", clearDone),
+            ]),
+        ]), [ui.class("status")]),
     ])
 }
 
-// The parts that do not change while you use the page. It is mounted once,
-// because re-mounting an <input> would throw away what is being typed into it —
-// Klang has no diffing DOM, so the split is explicit rather than hidden.
-fn shell() -> html.Node {
-    return html.div([], [
-        html.h1([], [html.text("Klang in the browser")]),
-        html.p([html.class("sub")], [
-            html.text("Markup, styling, state and every handler are "),
-            html.a([html.href("../web.kkg")], [html.text("examples/web.kkg")]),
-            html.text(" — Klang values, compiled to WebAssembly. There is no HTML "),
-            html.text("file and no CSS file behind this page."),
-        ]),
-        html.form([html.on("submit", "addTask")], [
-            html.label([html.class("sr-only")], [html.text("Task")]),
-            html.input([html.id("entry"), html.placeholder("something to do — esc to clear"),
-                        html.attr("autocomplete", "off")]),
-            html.button([html.type_("submit")], [html.text("add")]),
-        ]),
-        html.nav([html.id("filters")], []),
-        html.div([html.id("listbox")], []),
-        html.div([html.id("statusbox")], []),
-    ])
+// ── what the handlers do ──────────────────────────────────────────────
+//
+// Plain functions. They change state, save, and refresh; the diff works out what
+// that means for the DOM.
+
+fn addTask() {
+    let title = str.trim(ui.valueOf("#entry"))
+    if title == "" {
+        message = "type something first"
+        ui.refresh()
+        return
+    }
+    push(tasks, Task { id: nextId, title: title, done: false })
+    nextId += 1
+    message = ""
+    dom.setValue("#entry", "")
+    ui.focus("#entry")
+    save()
+    ui.refresh()
 }
 
-// Everything that changes is re-rendered from the state, which is the only copy.
-fn render() {
-    dom.mountAll("#filters", [
-        filterLink("all", "all", "#"),
-        filterLink("todo", "todo", "#todo"),
-        filterLink("done", "done", "#done"),
-    ])
-    dom.mount("#listbox", listView())
-    dom.mount("#statusbox", statusView())
+fn clearEntry() {
+    dom.setValue("#entry", "")
+    message = ""
+    ui.refresh()
+}
 
-    let left = list.count(tasks, |t| !t.done)
-    dom.setTitle(if left == 0 { "Klang — all done" } else { "Klang — ${left} left" })
+fn toggle(id: int) {
+    let i = indexOfId(id)
+    if i >= 0 {
+        tasks[i] = Task { id: id, title: tasks[i].title, done: !tasks[i].done }
+        message = ""
+        save()
+        ui.refresh()
+    }
+}
+
+fn removeTask(id: int) {
+    let i = indexOfId(id)
+    if i >= 0 {
+        remove(tasks, i)
+        save()
+        ui.refresh()
+    }
+}
+
+fn clearDone() {
+    let before = tasks.len()
+    tasks = list.filter(tasks, |t| !t.done)
+    message = if before == tasks.len() { "nothing to clear" }
+              else { "cleared ${before - tasks.len()}" }
+    save()
+    ui.refresh()
+}
+
+fn indexOfId(id: int) -> int {
+    for i in 0..tasks.len() {
+        if tasks[i].id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+// ── talking to a server ───────────────────────────────────────────────
+//
+// Both outcomes are handled, so there is no path where a failed request quietly
+// leaves the page as it was.
+
+fn sync() {
+    message = "syncing…"
+    ui.refresh()
+    fetch.post("/api/tasks", toJson(),
+        |body| {
+            message = match json.parse(body) {
+                Err(e)  => "server sent something odd: ${e}",
+                Ok(doc) => "synced ${fieldInt(doc, "saved")}",
+            }
+            ui.refresh()
+        },
+        |why| {
+            message = "sync failed: ${why}"
+            ui.refresh()
+        })
 }
 
 // ── persistence ───────────────────────────────────────────────────────
@@ -262,105 +250,68 @@ fn save() {
     dom.store(STORE_KEY, toJson())
 }
 
-fn indexOfId(id: int) -> int {
-    for i in 0..tasks.len() {
-        if tasks[i].id == id {
-            return i
-        }
-    }
-    return -1
-}
-
-fn parseId(text: string) -> int {
-    return match str.parseInt(text) {
-        Ok(n)  => n,
-        Err(_) => -1,
-    }
-}
-
-// ── the handlers the page names ───────────────────────────────────────
+// ── styling ───────────────────────────────────────────────────────────
 //
-// An `export fn` is a plain symbol JavaScript calls. Its arguments and result
-// have to be types JavaScript understands, and the compiler holds you to that.
+// The property names are functions, so a misspelling is a compile error rather
+// than a rule the browser quietly drops.
 
-export fn addTask() {
-    let title = str.trim(dom.value("#entry"))
-    if title == "" {
-        message = "type something first"
-        render()
-        return
-    }
-    push(tasks, Task { id: nextId, title: title, done: false })
-    nextId += 1
-    message = ""
-    dom.setValue("#entry", "")
-    dom.focus("#entry")
-    save()
-    render()
-}
+fn styles() -> [css.Block] {
+    return [
+        css.rule(":root", [css.colorScheme("light dark")]),
+        css.rule("body", [
+            css.font("16px/1.5 system-ui, sans-serif"),
+            css.maxWidth("34rem"),
+            css.margin("3rem auto"),
+            css.padding("0 1rem"),
+        ]),
+        css.rule("h1", [css.fontSize("1.4rem"), css.marginBottom(".2rem")]),
+        css.rule(".sub", [css.marginTop("0"), css.opacity(".7"), css.fontSize(".9rem")]),
 
-export fn toggleTask(idText: string) {
-    let i = indexOfId(parseId(idText))
-    if i >= 0 {
-        tasks[i] = Task { id: tasks[i].id, title: tasks[i].title, done: !tasks[i].done }
-        message = ""
-        save()
-        render()
-    }
-}
+        css.rule("form", [css.display("flex"), css.gap(".5rem"), css.margin("1.2rem 0 .8rem")]),
+        css.rule("input", [
+            css.flex("1"), css.padding(".5rem .7rem"),
+            css.border("1px solid #8886"), css.radius(".4rem"),
+            css.background("transparent"), css.color("inherit"), css.font("inherit"),
+        ]),
+        css.rule("button", [
+            css.padding(".5rem .9rem"), css.border("1px solid #8886"),
+            css.radius(".4rem"), css.background("transparent"),
+            css.color("inherit"), css.font("inherit"), css.cursor("pointer"),
+        ]),
+        css.rule("button:hover", [css.background("#8882")]),
 
-export fn deleteTask(idText: string) {
-    let i = indexOfId(parseId(idText))
-    if i >= 0 {
-        remove(tasks, i)
-        save()
-        render()
-    }
-}
+        css.rule("nav", [css.display("flex"), css.gap(".4rem"),
+                         css.fontSize(".85rem"), css.marginBottom(".8rem")]),
+        css.rule("nav a", [css.padding(".2rem .6rem"), css.radius(".3rem"),
+                           css.textDecoration("none"), css.color("inherit"),
+                           css.opacity(".6")]),
+        css.rule("nav a.on", [css.opacity("1"), css.background("#8883")]),
 
-export fn clearDone() {
-    let before = tasks.len()
-    tasks = list.filter(tasks, |t| !t.done)
-    message = if before == tasks.len() { "nothing to clear" }
-              else { "cleared ${before - tasks.len()}" }
-    save()
-    render()
-}
+        css.rule("ul", [css.listStyle("none"), css.padding("0"), css.margin("0"),
+                        css.border("1px solid #8884"), css.radius(".5rem")]),
+        css.rule("li", [css.display("flex"), css.align("center"), css.gap(".6rem"),
+                        css.padding(".45rem .6rem"), css.borderBottom("1px solid #8882")]),
+        css.rule("li:last-child", [css.borderBottom("0")]),
+        css.rule("li span", [css.flex("1")]),
+        css.rule("li.done span", [css.opacity(".45"), css.textDecoration("line-through")]),
+        css.rule("li.empty", [css.opacity(".5"), css.fontStyle("italic"),
+                              css.justify("center")]),
+        css.rule("li button", [css.border("0"), css.padding(".15rem .45rem"),
+                               css.fontSize("1rem"), css.opacity(".6")]),
+        css.rule("li button:hover", [css.opacity("1")]),
 
-// Escape clears the box, which is what everyone expects and nobody implements.
-export fn onKey(key: string) {
-    if key == "Escape" {
-        dom.setValue("#entry", "")
-        message = ""
-        render()
-    }
-}
+        css.rule(".status", [css.display("flex"), css.justify("space-between"),
+                             css.align("center"), css.gap(".5rem"),
+                             css.fontSize(".85rem"), css.opacity(".75"),
+                             css.marginTop(".8rem")]),
+        css.rule(".status .message", [css.flex("1"), css.textAlign("center")]),
+        css.rule(".status button", [css.padding(".3rem .6rem")]),
 
-export fn onRoute() {
-    let h = dom.hash()
-    filter = if h == "#done" { "done" } else if h == "#todo" { "todo" } else { "all" }
-    render()
-}
-
-// ── talking to a server ───────────────────────────────────────────────
-
-export fn sync() {
-    message = "syncing…"
-    render()
-    fetch.post("/api/tasks", toJson(), "syncDone", "syncFailed")
-}
-
-export fn syncDone(body: string) {
-    message = match json.parse(body) {
-        Err(e)  => "server sent something odd: ${e}",
-        Ok(doc) => "synced ${fieldInt(doc, "saved")}",
-    }
-    render()
-}
-
-export fn syncFailed(why: string) {
-    message = "sync failed: ${why}"
-    render()
+        css.media("(max-width: 30rem)", [
+            css.rule("body", [css.margin("1.5rem auto")]),
+            css.rule("h1", [css.fontSize("1.2rem")]),
+        ]),
+    ]
 }
 
 // Readable from JavaScript, so the host page can ask Klang how it is doing.
@@ -370,17 +321,15 @@ export fn remaining() -> int {
 
 fn main() {
     load()
-
     dom.setTitle("Klang in the browser")
     dom.useStyle(css.sheet(styles()))
-    dom.mount("#app", shell())
-    // One listener each, on the container. Everything mounted later is covered,
-    // because the listener is not on the elements.
-    dom.delegate("#app", "click")
-    dom.delegate("#app", "submit")
-    dom.onKey("#entry", "keydown", "onKey")
-    dom.onHashChange("onRoute")
 
-    onRoute()
+    // The address bar is state like any other: set it, then re-render.
+    ui.onRoute(|r| {
+        filter = if r == "done" { "done" } else if r == "todo" { "todo" } else { "all" }
+        ui.refresh()
+    })
+
+    ui.mount("#app", view)
     dom.log("klang: ready, ${tasks.len()} tasks")
 }

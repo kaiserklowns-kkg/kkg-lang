@@ -11,7 +11,7 @@
 //         ]),
 //     ])
 //
-// So a page needs no .css file, the same way std/html means it needs no .html
+// So a page needs no .css file, the same way std/ui means it needs no .html
 // file. `dom.useStyle` puts the result on the page.
 //
 // Property values are strings, because CSS values are an open set — every unit,

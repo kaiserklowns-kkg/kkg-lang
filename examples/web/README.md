@@ -15,7 +15,7 @@ are there when you want them, and `klangc web build` stops after the build.
 
 `index.html`, `app.js` and `app.wasm` are all generated; none of them is
 committed. The page shell is written by klangc, the markup comes from
-[std/html](../../std/html.kkg) and the styling from [std/css](../../std/css.kkg),
+[std/ui](../../std/ui.kkg) and the styling from [std/css](../../std/css.kkg),
 both built as Klang values in `web.kkg`.
 
 This directory exists at all because a program's page directory is where assets

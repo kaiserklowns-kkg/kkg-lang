@@ -1,13 +1,12 @@
 // std/fetch — HTTP from a browser.
 //
-// The reply arrives at an `export fn` named by string, the same shape std/dom
-// uses for events, and for the same reason: a Klang closure lives in Klang's
-// heap and JavaScript cannot keep it alive across a network round trip.
+//     fetch.get("/api/items",
+//         |body| { items = parse(body); ui.refresh() },
+//         |why|  { message = "could not load: ${why}"; ui.refresh() })
 //
-//     export fn gotItems(body: string) { ... }
-//     export fn itemsFailed(why: string) { ... }
-//
-//     fetch.get("/api/items", "gotItems", "itemsFailed")
+// The handlers are closures, the same as everywhere else. JavaScript never holds
+// one: they go into a Klang array and the request carries an index, which is the
+// trick std/ui uses for events and works just as well across a round trip.
 //
 // Why not `let body = fetch.get(url)?`, which would read better? Because making a
 // wasm call block on a promise means Emscripten's Asyncify, and Asyncify unwinds
@@ -23,47 +22,83 @@
 
 // A single primitive; the shapes below are conveniences over it.
 js fn jsSend(method: string, url: string, body: string, contentType: string,
-             onOk: string, onErr: string) {
+             slot: int) {
     var init = { method: method }
     if (method !== "GET" && method !== "HEAD") {
         init.body = body
         init.headers = { "Content-Type": contentType }
     }
-    var fail = function(why) { Module.ccall(onErr, null, ["string"], [String(why)]) }
+    var done = function(ok, text) {
+        Module.ccall("klangFetchDone", null, ["number", "number", "string"],
+                     [slot, ok ? 1 : 0, String(text)])
+    }
     fetch(url, init).then(function(res) {
         return res.text().then(function(text) {
-            if (!res.ok) {
-                fail(res.status + " " + (res.statusText || "request failed"))
-                return
-            }
-            Module.ccall(onOk, null, ["string"], [text])
+            if (res.ok) done(true, text)
+            else done(false, res.status + " " + (res.statusText || "request failed"))
         })
     }).catch(function(e) {
-        fail(e && e.message ? e.message : e)
+        done(false, e && e.message ? e.message : e)
     })
 }
 
-// `onOk` names an `export fn` taking the response body; `onErr` one taking the
-// reason it did not arrive. Both take a single string.
-
-pub fn get(url: string, onOk: string, onErr: string) {
-    unsafe { jsSend("GET", url, "", "", onOk, onErr) }
+// A request in flight: the two closures waiting for it. The slot is what crosses
+// to JavaScript, so nothing of Klang's does.
+struct Waiting {
+    ok: fn(string),
+    err: fn(string),
+    live: bool,
 }
 
-pub fn post(url: string, body: string, onOk: string, onErr: string) {
-    unsafe { jsSend("POST", url, body, "application/json", onOk, onErr) }
+let mut waiting: [Waiting] = []
+
+// Called from JavaScript when a request finishes, either way.
+export fn klangFetchDone(slot: int, ok: int, text: string) {
+    if slot < 0 || slot >= waiting.len() || !waiting[slot].live {
+        return
+    }
+    let w = waiting[slot]
+    // Cleared before the handler runs, so a handler that starts another request
+    // can reuse this slot, and so a duplicate reply cannot fire it twice.
+    waiting[slot] = Waiting { ok: w.ok, err: w.err, live: false }
+    if ok == 1 {
+        w.ok(text)
+    } else {
+        w.err(text)
+    }
 }
 
-pub fn put(url: string, body: string, onOk: string, onErr: string) {
-    unsafe { jsSend("PUT", url, body, "application/json", onOk, onErr) }
+fn park(ok: fn(string), err: fn(string)) -> int {
+    for i in 0..waiting.len() {
+        if !waiting[i].live {
+            waiting[i] = Waiting { ok: ok, err: err, live: true }
+            return i
+        }
+    }
+    push(waiting, Waiting { ok: ok, err: err, live: true })
+    return waiting.len() - 1
 }
 
-pub fn del(url: string, onOk: string, onErr: string) {
-    unsafe { jsSend("DELETE", url, "", "", onOk, onErr) }
+// `ok` is given the response body; `err` the reason it did not arrive.
+
+pub fn get(url: string, ok: fn(string), err: fn(string)) {
+    unsafe { jsSend("GET", url, "", "", park(ok, err)) }
+}
+
+pub fn post(url: string, body: string, ok: fn(string), err: fn(string)) {
+    unsafe { jsSend("POST", url, body, "application/json", park(ok, err)) }
+}
+
+pub fn put(url: string, body: string, ok: fn(string), err: fn(string)) {
+    unsafe { jsSend("PUT", url, body, "application/json", park(ok, err)) }
+}
+
+pub fn del(url: string, ok: fn(string), err: fn(string)) {
+    unsafe { jsSend("DELETE", url, "", "", park(ok, err)) }
 }
 
 // Everything else: your own method, body and content type.
 pub fn send(method: string, url: string, body: string, contentType: string,
-            onOk: string, onErr: string) {
-    unsafe { jsSend(method, url, body, contentType, onOk, onErr) }
+            ok: fn(string), err: fn(string)) {
+    unsafe { jsSend(method, url, body, contentType, park(ok, err)) }
 }

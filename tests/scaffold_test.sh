@@ -42,13 +42,13 @@ echo "  server  builds"
 
 # ── a web project is Klang and nothing else ───────────────────────────
 #
-# The whole point: no .html, no .css, no .js, no .c. The markup is std/html and
+# The whole point: no .html, no .css, no .js, no .c. The markup is std/ui and
 # the styling std/css; klangc writes the page shell at build time.
 "$KLANGC" new demo-web > /dev/null
 strays=$(find demo-web -type f ! -name "*.kkg" ! -name "README.md" ! -name ".gitignore")
 [ -z "$strays" ] || fail "a fresh web project should be Klang only, but has:
 $strays"
-grep -q 'std/html' demo-web/src/main.kkg || fail "the template does not build its markup in Klang"
+grep -q 'std/ui' demo-web/src/main.kkg || fail "the template does not build its markup in Klang"
 grep -q 'std/css' demo-web/src/main.kkg || fail "the template does not build its styling in Klang"
 echo "  web     a fresh project is .kkg and nothing else"
 
@@ -85,7 +85,7 @@ fi
 
 cat > drive.js <<EOF
 // The scaffolded page, driven against the shared stub DOM: the markup is built by
-// Klang, so this also checks that std/html and delegation work in the template
+// Klang, so this also checks that std/ui and its diff work in the template
 // everyone starts from.
 const { install } = require("$HERE/tests/stub_dom.js");
 const { app, q, byText, styleText } = install();
@@ -102,7 +102,7 @@ setTimeout(() => {
   want(q("#count").textContent, "0 clicks", "first render");
   app.fire("click", byText("button", "click me"));
   app.fire("click", byText("button", "click me"));
-  want(q("#count").textContent, "2 clicks", "after two clicks, via delegation");
+  want(q("#count").textContent, "2 clicks", "after two clicks");
   console.log("  web     runs — markup and styling both Klang, and the button counts");
 }, 200);
 EOF

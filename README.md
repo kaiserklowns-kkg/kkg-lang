@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.22 — Phase 21 complete
+## Status: v0.23 — Phase 22 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -77,7 +77,7 @@ aspirational.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
-  [std/http](std/http.kkg), [std/json](std/json.kkg), [std/html](std/html.kkg),
+  [std/http](std/http.kkg), [std/json](std/json.kkg), [std/ui](std/ui.kkg),
   [std/css](std/css.kkg),
   [std/dom](std/dom.kkg), [std/fetch](std/fetch.kkg).
 - **WASM** — Klang compiles to WASM and runs there correctly. Every example passes
@@ -88,23 +88,22 @@ aspirational.
 - **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces
   hold one expression and `else` is required, so braces keep meaning one thing.
 - **You write Klang and nothing else** — no HTML, no CSS, no JavaScript, no C.
-  A web project is one `.kkg` file: [std/html](std/html.kkg) makes markup a value,
-  so escaping is structural (a `text` node cannot inject a tag, and `raw` has to
-  be typed on purpose) and a handler is attached where the element is built —
-  `html.on("click", "addTask")` needs no id and no wiring elsewhere.
+  A web project is one `.kkg` file: [std/ui](std/ui.kkg) is React's model in
+  Klang — a component is a function returning a `Node`, handlers are closures,
+  and `refresh` diffs the DOM rather than rebuilding it, so a live `<input>`
+  keeps what is being typed into it. Escaping is structural.
   [std/css](std/css.kkg) does the same for styling, with property names as
   functions so a misspelling is a compile error. klangc writes the page shell at
   build time. `make check` asserts a fresh project contains nothing but Klang.
-- **Frontend** — `js fn` declares a function whose body is JavaScript and lets the
-  compiler marshal the boundary; `export fn` makes a Klang function callable from
-  JavaScript; module-level `let mut` holds the state an event handler needs.
-  [std/dom](std/dom.kkg) covers text, HTML, attributes, classes, events, hash
-  routing, localStorage and timers; [std/fetch](std/fetch.kkg) is HTTP, with the
-  reply arriving at an export and every call naming an error handler.
-  [examples/web.kkg](examples/web.kkg) is a working application — a form, event
-  delegation over a list, routing, state persisted as JSON, and a sync that posts
-  it — written entirely in Klang, and `make test-web` drives all of it against a
-  stub DOM and a stub server.
+- **Frontend plumbing** — `js fn` declares a function whose body is JavaScript and
+  lets the compiler marshal the boundary; `export fn` makes a Klang function
+  callable from JavaScript. [std/dom](std/dom.kkg) covers text, attributes,
+  classes, storage, the address bar and timers; [std/fetch](std/fetch.kkg) is
+  HTTP, taking closures and requiring an error handler on every call.
+  [examples/web.kkg](examples/web.kkg) is a working application — a form, a keyed
+  list, routing, state persisted as JSON, and a sync that posts it — written
+  entirely in Klang, and `make test-web` drives all of it against a stub DOM and a
+  stub server.
 - **Stylesheets** — plain CSS is a static file and always worked. Tailwind is
   first-class: `klangc new --css tailwind` scaffolds it and `klangc web run`
   compiles it, with `@source` pointed at `src/**/*.kkg` so the class names Klang

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.22)
+# Klang Language Spec (v0.23)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -34,7 +34,7 @@
   operating system runs directly, linked against nothing but the C library — no runtime
   to ship, no interpreter, no JavaScript. `--static` needs not even libc.
 - **You write Klang and nothing else.** Not HTML, not CSS, not JavaScript, not C.
-  A web project is `src/main.kkg`: markup from [std/html](#the-page-itself), styling
+  A web project is `src/main.kkg`: markup from [std/ui](#the-page-itself), styling
   from [std/css](#stylesheets-in-klang), and a page shell klangc writes at build
   time. A native program is the same file with no browser involved. Where a
   boundary to another language is unavoidable — syscalls, the DOM — the standard
@@ -660,50 +660,62 @@ which it is not, because the boundary copies.
 
 ### The page itself
 
-Markup is Klang values, not strings and not an `.html` file:
+A component is a function that returns a `Node`. State is ordinary Klang. Change
+it, call `refresh`, and the view is rebuilt:
 
 ```kkg
-import "std/dom"
-import "std/html"
+import "std/ui"
 
-fn taskRow(t: Task) -> html.Node {
-    return html.li([html.class(if t.done { "done" } else { "" })], [
-        html.button([html.on("click", "toggleTask"), html.arg("${t.id}")],
-                    [html.text(if t.done { "☑" } else { "☐" })]),
-        html.span([], [html.text(t.title)]),
+let mut clicks = 0
+
+fn view() -> ui.Node {
+    return ui.col([
+        ui.h1("Klang"),
+        ui.button("click me", || { clicks += 1; ui.refresh() }),
+        ui.line("${clicks} clicks"),
     ])
 }
 
-fn render() {
-    dom.mount("#app", html.ul([], list.map(tasks, taskRow)))
-}
+fn main() { ui.mount("#app", view) }
 ```
 
-Three things follow from a page being a value.
+This is React's model, and it is the model because the alternative — deciding by
+hand which part of the page to redraw — does not survive contact with a real
+application. Four things make it work.
 
-**Escaping is structural.** A `text` node is escaped when it is rendered, so there
-is no way to forget — and `t.title` above cannot inject markup no matter what is
-in it. The only route to unescaped output is `html.raw`, which has to be typed on
-purpose. Attribute values are escaped the same way.
+**The view is rebuilt; the DOM is not.** `refresh` compares the new tree against
+what is mounted and touches only what differs. Without that, re-rendering would
+discard whatever is being typed into an `<input>`; with it, the element is the same
+element and keeps its value, its focus and its scroll position.
 
-**A handler is attached where the element is built.** `html.on("click", "toggleTask")`
-becomes a `data-on-click` attribute, and `dom.delegate("#app", "click")` installs
-one listener that reads it and calls that `export fn` — passing `html.arg(v)` when
-there is one. So a button needs no id, no selector, and no matching line elsewhere
-in `main`. One listener covers everything mounted later, because it is on the
-container rather than on the elements.
+**Keys.** `ui.keyed(node, "${t.id}")` tells the diff which row is which, so
+deleting one from the middle of a list moves nothing else.
+
+**Handlers are closures**, not names:
+
+```kkg
+ui.button("delete", || removeTask(t.id))
+```
+
+That looks impossible — a Klang closure lives in Klang's heap, and JavaScript can
+neither keep it alive nor know when it is done with it. The way through is that
+JavaScript never holds one. The closures go into a Klang array, the DOM carries an
+index into it, and one listener per event type hands the index back. The array is
+rebuilt every render, so nothing accumulates, and the collector sees all of it as
+ordinary Klang data. [std/fetch](../std/fetch.kkg) crosses a network round trip the
+same way.
+
+**Escaping is structural.** A text node is escaped on the way in, so `t.title`
+cannot inject markup whatever is in it, and there is no way to forget.
 
 **There is no `index.html`.** klangc writes the shell — charset, viewport, title,
 script, and an empty `<div id="app">` — at build time, and regenerates it whenever
-it is missing. `klangc new` does not create one, so a fresh web project is a
-single `.kkg` file. Write your own beside the program if you want control of the
-`<head>` (a font link, an extra `<meta>`) and that one is used instead.
+it is missing. `klangc new` does not create one, so a fresh web project is a single
+`.kkg` file. Write your own beside the program if you want control of the `<head>`
+(a font link, an extra `<meta>`) and that one is used instead.
 
-What Klang does not have is a diffing DOM. Re-mounting a subtree replaces it, which
-would throw away what is being typed into an `<input>`, so the static chrome is
-mounted once and the parts that change are re-mounted from the state. That split is
-explicit in [examples/web.kkg](../examples/web.kkg) rather than hidden behind a
-framework.
+The same `Node` renders to a string with `ui.toHtml`, for a server generating HTML
+rather than a browser mounting it. One type, two renderers.
 
 ### Stylesheets, in Klang
 
@@ -1024,7 +1036,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.22, Phase 21 complete)
+## Implemented today (v0.23, Phase 22 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -1057,6 +1069,15 @@ locking and the safepoints are only emitted when the program actually contains a
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 22 additions — std/ui, and the old UI layer retired**
+- The scaffold, examples/web.kkg, std/fetch and the docs all moved onto std/ui;
+  std/html and the string-named event helpers in std/dom are gone. There is one
+  way to build a page again, which there had briefly not been.
+- **std/fetch takes closures** like everything else, parking them in a Klang array
+  and passing a slot across, so a reply cannot fire twice and a handler can start
+  the next request from inside the last one
+- **ui.onRoute / ui.route / ui.goTo** — the address bar is state like any other
+
 **Phase 21 additions — no HTML file, no CSS file**
 - **`std/css`** — stylesheets as values: `rule`, `media`, `at`, `set`, and the
   properties worth having by name so a misspelling is a compile error. A selector
@@ -1074,19 +1095,15 @@ locking and the safepoints are only emitted when the program actually contains a
   for a rule, a pseudo-class and a media query
 
 **Phase 20 additions — the page is Klang too**
-- **`std/html`** — markup as values. `Node` / `Element` / `Attr`, the tags worth
-  having by name, void elements that take no children, and `render` that escapes
-  text and attribute values structurally. `raw` is the only way out, and it has to
-  be typed on purpose.
-- **`html.on(event, "handler")` and `html.arg(v)`** — the handler travels with the
-  element, so a button needs no id and no wiring elsewhere
-- **`dom.mount` / `dom.mountAll` / `dom.delegate`** — one listener on a container
-  dispatches `data-on-*` to exports, and keeps working for everything mounted later
-- **`index.html` holds no application markup** — a shell with `<div id="app">`.
-  Both scaffolds and the generated fallback page were reduced to that.
-- [examples/web.kkg](../examples/web.kkg) builds its heading, form, filters, list,
-  status bar and buttons in Klang. The test parses the rendered markup into a real
-  tree, so delegation has to find the right ancestor and escaping has to have
+- **`std/ui`** — React's model in Klang: a component is a function returning a
+  `Node`, state is ordinary Klang, and `refresh` diffs the DOM rather than
+  rebuilding it, so a live `<input>` keeps its identity and its contents. Keyed
+  lists, so deleting from the middle moves nothing else.
+- **Handlers are closures**, not names. JavaScript never holds one: they live in a
+  Klang array, the DOM carries an index, and one listener per event type hands it
+  back. `std/fetch` crosses a network round trip the same way.
+- **`ui.toHtml`** renders the same `Node` to a string, for a server rather than a
+  browser — one type, two renderers. `std/html` was retired into it.
   happened — a `<script>` typed into the box is asserted to arrive as text.
 
 **Phase 19 additions — `klangc build`**
