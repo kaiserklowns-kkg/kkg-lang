@@ -72,6 +72,68 @@ pub fn lookup(j: Json, key: string) -> Option<Json> {
     }
 }
 
+// ── reading a field, which is what reading JSON actually is ───────────
+//
+// `lookup` and `asString` are the honest primitives: both can fail, and a caller
+// who cares handles both. Almost no caller cares. Every program that used this
+// module wrote the same three functions to say "this field, or a sensible
+// nothing", so they belong here instead.
+
+pub fn textAt(doc: Json, key: string) -> string {
+    return match lookup(doc, key) {
+        Some(v) => match asString(v) { Some(s) => s, None => "" },
+        None    => "",
+    }
+}
+
+pub fn floatAt(doc: Json, key: string) -> float {
+    return match lookup(doc, key) {
+        Some(v) => match asFloat(v) { Some(n) => n, None => 0.0 },
+        None    => 0.0,
+    }
+}
+
+pub fn intAt(doc: Json, key: string) -> int {
+    return toInt(floatAt(doc, key))
+}
+
+pub fn boolAt(doc: Json, key: string) -> bool {
+    return match lookup(doc, key) {
+        Some(v) => match asBool(v) { Some(b) => b, None => false },
+        None    => false,
+    }
+}
+
+// The array at a key, empty when it is missing or is not one.
+pub fn itemsAt(doc: Json, key: string) -> [Json] {
+    return match lookup(doc, key) {
+        Some(v) => items(v),
+        None    => [],
+    }
+}
+
+pub fn hasKey(doc: Json, key: string) -> bool {
+    return match lookup(doc, key) {
+        Some(_) => true,
+        None    => false,
+    }
+}
+
+// ── writing one ───────────────────────────────────────────────────────
+//
+// Shorthands for the shapes that come up constantly, so building a small object
+// is one line rather than four.
+
+pub fn text(key: string, value: string) -> Field { return field(key, Str(value)) }
+pub fn num(key: string, value: int) -> Field { return field(key, numOf(value)) }
+pub fn real(key: string, value: float) -> Field { return field(key, Num(value)) }
+pub fn flag(key: string, value: bool) -> Field { return field(key, Bool(value)) }
+pub fn list(key: string, value: [Json]) -> Field { return field(key, Arr(value)) }
+
+// `json.object([...])` renders straight to text, which is what a reply body is.
+pub fn object(fields: [Field]) -> string { return stringify(Obj(fields)) }
+pub fn array(values: [Json]) -> string { return stringify(Arr(values)) }
+
 fn firstMatching(fs: [Field], key: string) -> Option<Json> {
     for f in fs {
         if f.key == key {

@@ -11,6 +11,8 @@ pub struct Request {
     path: string,
     query: string,
     headers: {string: string},
+    // Whatever `:name` in the route matched. Empty for a route with none.
+    params: {string: string},
     body: string,
 }
 
@@ -114,7 +116,9 @@ pub fn parseRequest(raw: string) -> Result<Request, string> {
             headers[name] = line.substr(colon + 1, line.len()).trim()
         }
     }
-    return Ok(Request { method: parts[0], path: path, query: query, headers: headers, body: body })
+    let empty: {string: string} = {}
+    return Ok(Request { method: parts[0], path: path, query: query,
+                        headers: headers, params: empty, body: body })
 }
 
 pub fn render(r: Response) -> string {
@@ -129,6 +133,94 @@ pub fn render(r: Response) -> string {
 }
 
 // Reads one request off the connection, hands it to `handle`, writes the reply.
+// ── routes ────────────────────────────────────────────────────────────
+//
+//     http.serve(8099, [
+//         http.get("/api/tasks", listTasks),
+//         http.post("/api/tasks", createTask),
+//         http.put("/api/tasks/:id", updateTask),
+//         http.remove("/api/tasks/:id", deleteTask),
+//     ])
+//
+// A table rather than a chain of ifs, because the chain has to get four things
+// right every time and quietly gets them wrong: a path that exists but not for
+// this method is a 405 and not a 404, OPTIONS has to be answered before a browser
+// will send anything interesting, and both have to happen for every route rather
+// than the ones you remembered.
+
+pub struct Route {
+    method: string,
+    pattern: string,
+    run: fn(Request) -> Response,
+}
+
+pub fn on(method: string, pattern: string, run: fn(Request) -> Response) -> Route {
+    return Route { method: method, pattern: pattern, run: run }
+}
+
+pub fn get(pattern: string, run: fn(Request) -> Response) -> Route {
+    return on("GET", pattern, run)
+}
+pub fn post(pattern: string, run: fn(Request) -> Response) -> Route {
+    return on("POST", pattern, run)
+}
+pub fn put(pattern: string, run: fn(Request) -> Response) -> Route {
+    return on("PUT", pattern, run)
+}
+// Not `delete`: that reads as a verb the language might want one day.
+pub fn remove(pattern: string, run: fn(Request) -> Response) -> Route {
+    return on("DELETE", pattern, run)
+}
+
+// "/api/tasks/:id" against "/api/tasks/7" gives {"id": "7"}. A segment count
+// mismatch is not a match, so "/api/tasks" never reaches a route expecting an id.
+fn match1(pattern: string, path: string) -> Option<{string: string}> {
+    let want = pattern.split("/")
+    let got = path.split("/")
+    if want.len() != got.len() {
+        return None
+    }
+    let mut params: {string: string} = {}
+    for i in 0..want.len() {
+        if want[i].startsWith(":") {
+            params[want[i].substr(1, want[i].len())] = got[i]
+        } else if want[i] != got[i] {
+            return None
+        }
+    }
+    return Some(params)
+}
+
+fn withParams(r: Request, params: {string: string}) -> Request {
+    return Request { method: r.method, path: r.path, query: r.query,
+                     headers: r.headers, params: params, body: r.body }
+}
+
+// Picks the route and produces the reply, including the two answers people forget.
+pub fn dispatch(routes: [Route], req: Request) -> Response {
+    let mut pathMatched = false
+    for r in routes {
+        match match1(r.pattern, req.path) {
+            None => { }
+            Some(params) => {
+                pathMatched = true
+                if r.method == req.method {
+                    return r.run(withParams(req, params))
+                }
+                // A browser asks before a cross-origin POST, and will not send
+                // one until this is answered.
+                if req.method == "OPTIONS" {
+                    return noContent()
+                }
+            }
+        }
+    }
+    if pathMatched {
+        return notAllowed()
+    }
+    return notFound()
+}
+
 pub fn serveOne(c: net.Conn, handle: fn(Request) -> Response) {
     match net.readSome(c) {
         Ok(raw) => {
@@ -141,4 +233,53 @@ pub fn serveOne(c: net.Conn, handle: fn(Request) -> Response) {
         Err(_e) => { }
     }
     net.closeConn(c)
+}
+
+// ── serving ───────────────────────────────────────────────────────────
+//
+// The accept loop is the same in every server, so it lives here. `serve` returns
+// only if the port cannot be opened, and says why.
+
+fn loopOn(listener: net.Listener, routes: [Route], origin: string) {
+    while true {
+        match net.acceptOne(listener) {
+            Err(e)   => println("accept: ${e}")
+            Ok(conn) => {
+                serveOne(conn, |req| {
+                    let reply = dispatch(routes, req)
+                    // The CORS headers go on every reply including the failures.
+                    // A 404 the browser will not let the page read is a 404
+                    // nobody can debug.
+                    return if origin == "" { reply } else { allowOrigin(reply, origin) }
+                })
+            }
+        }
+    }
+}
+
+pub fn serve(port: int, routes: [Route]) -> Result<int, string> {
+    match net.listenOn(port) {
+        Err(e) => { return Err(e) }
+        Ok(listener) => {
+            println("listening on http://127.0.0.1:${port}")
+            loopOn(listener, routes, "")
+            net.closeListener(listener)
+            return Ok(port)
+        }
+    }
+}
+
+// The same, but every reply says any origin may read it. Named so that choosing
+// it is visible: it is the right default for a development API and the wrong one
+// for anything holding a session.
+pub fn serveOpen(port: int, routes: [Route]) -> Result<int, string> {
+    match net.listenOn(port) {
+        Err(e) => { return Err(e) }
+        Ok(listener) => {
+            println("listening on http://127.0.0.1:${port}  (open to any origin)")
+            loopOn(listener, routes, "*")
+            net.closeListener(listener)
+            return Ok(port)
+        }
+    }
 }

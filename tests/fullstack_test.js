@@ -43,7 +43,8 @@ const submitForm = () => app.fire("submit", all().find((n) => n.tag === "form"))
 const click = (label) => app.fire("click", byText("button", label));
 const clickIn = (row, label) =>
   app.fire("click", row.children.find((c) => c.textContent.trim() === label));
-const status = () => all().find((n) => n.classes.has("status")).textContent;
+// `.row` is the class std/css's base sheet gives a status line.
+const status = () => all().find((n) => n.classes.has("row")).textContent;
 
 // The page talks to the server, so waiting means waiting for a round trip. Poll
 // rather than sleep a fixed time, so the test is neither flaky nor slow.
@@ -104,8 +105,8 @@ const Module = require(path);
 
   // ── the health endpoint, which reports the server's own heap ────────
   click("health");
-  await until("the health round trip", () => status().includes("requests"));
-  contains("server heap reported", status(), "bytes of heap");
+  await until("the health round trip", () => status().includes("bytes of heap"));
+  contains("the server reported its own heap", status(), "bytes of heap");
 
   // ── a real failure: point the page at a dead port ───────────────────
   // Not by stubbing fetch — by stopping the server, which the harness does after

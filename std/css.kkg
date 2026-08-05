@@ -154,3 +154,60 @@ fn renderAt(a: AtRule) -> string {
     }
     return out + "}\n"
 }
+
+// ── a page that looks like a page ─────────────────────────────────────
+//
+// Forty lines of CSS to get readable text, a sane column width and controls that
+// do not look like 1996 is the same forty lines in every project. `base()` is
+// them, as a starting sheet: append your own rules after it and they win, since
+// later rules do.
+
+pub fn base() -> [Block] {
+    return [
+        rule(":root", [colorScheme("light dark")]),
+        rule("body", [font("16px/1.6 system-ui, sans-serif"), maxWidth("34rem"),
+                      margin("3rem auto"), padding("0 1rem")]),
+        rule("h1", [fontSize("1.4rem"), marginBottom(".2rem")]),
+        rule("h2", [fontSize("1.15rem")]),
+        rule("a", [color("inherit")]),
+
+        rule("form", [display("flex"), gap(".5rem"), margin("1.2rem 0 .8rem")]),
+        rule("input", [flex("1"), padding(".5rem .7rem"), border("1px solid #8886"),
+                       radius(".4rem"), background("transparent"), color("inherit"),
+                       font("inherit")]),
+        rule("button", [padding(".5rem .9rem"), border("1px solid #8886"),
+                        radius(".4rem"), background("transparent"), color("inherit"),
+                        font("inherit"), cursor("pointer")]),
+        rule("button:hover", [background("#8882")]),
+
+        rule("ul", [listStyle("none"), padding("0"), margin("0"),
+                    border("1px solid #8884"), radius(".5rem")]),
+        rule("li", [display("flex"), align("center"), gap(".6rem"),
+                    padding(".45rem .6rem"), borderBottom("1px solid #8882")]),
+        rule("li:last-child", [borderBottom("0")]),
+        rule("li span", [flex("1")]),
+        rule("li button", [border("0"), padding(".15rem .45rem"), fontSize("1rem"),
+                           opacity(".6")]),
+        rule("li button:hover", [opacity("1")]),
+
+        // The classes std/ui's own helpers hand out, so they mean something
+        // without every page redefining them.
+        rule(".sub", [marginTop("0"), opacity(".7"), fontSize(".9rem")]),
+        rule(".muted", [opacity(".7")]),
+        rule(".done span", [opacity(".45"), textDecoration("line-through")]),
+        rule(".empty", [opacity(".5"), fontStyle("italic"), justify("center")]),
+        rule(".row", [display("flex"), justify("space-between"), align("center"),
+                      gap(".5rem"), fontSize(".85rem"), opacity(".75"),
+                      marginTop(".8rem")]),
+        rule(".row .grow", [flex("1"), textAlign("center")]),
+        rule(".row button", [padding(".3rem .6rem")]),
+    ]
+}
+
+// `css.sheet(css.with(css.base(), [ ... ]))` — the defaults, then yours.
+pub fn with(a: [Block], b: [Block]) -> [Block] {
+    let mut out: [Block] = []
+    for x in a { push(out, x) }
+    for x in b { push(out, x) }
+    return out
+}

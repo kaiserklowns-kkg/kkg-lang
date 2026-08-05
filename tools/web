@@ -1,0 +1,11 @@
+#!/bin/sh
+# `web run` and `web build`, as asked for.
+#
+#     web run                     the program in this directory, served
+#     web run app.kkg             a particular one
+#     web build                   built, not served
+#
+# Exactly `klangc web ...`, with the klangc left off, because running a page is
+# common enough to deserve its own word.
+
+exec "$(dirname "$0")/klangc" web "$@"

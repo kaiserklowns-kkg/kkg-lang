@@ -42,7 +42,7 @@ fn taskRow(t: Task) -> ui.Node {
         ui.tag("span", t.title),
         ui.with(ui.button("×", || removeTask(t.id)),
                 [ui.class("delete"), ui.title("delete")]),
-    ]), [ui.class(if t.done { "task done" } else { "task" })]), "${t.id}")
+    ]), [ui.class(if t.done { "done" } else { "" })]), "${t.id}")
 }
 
 fn visible() -> [Task] {
@@ -92,12 +92,12 @@ fn view() -> ui.Node {
 
         ui.with(ui.div([
             ui.tag("span", "${left} of ${tasks.len()} left"),
-            ui.with(ui.tag("span", message), [ui.class("message")]),
+            ui.with(ui.tag("span", message), [ui.class("grow")]),
             ui.span([
                 ui.button("sync", sync),
                 ui.button("clear done", clearDone),
             ]),
-        ]), [ui.class("status")]),
+        ]), [ui.class("row")]),
     ])
 }
 
@@ -177,7 +177,7 @@ fn sync() {
         |body| {
             message = match json.parse(body) {
                 Err(e)  => "server sent something odd: ${e}",
-                Ok(doc) => "synced ${fieldInt(doc, "saved")}",
+                Ok(doc) => "synced ${json.intAt(doc, "saved")}",
             }
             ui.refresh()
         },
@@ -195,33 +195,12 @@ fn toJson() -> string {
     let mut items: [json.Json] = []
     for t in tasks {
         push(items, Obj([
-            json.field("id", json.numOf(t.id)),
-            json.field("title", Str(t.title)),
-            json.field("done", Bool(t.done)),
+            json.num("id", t.id),
+            json.text("title", t.title),
+            json.flag("done", t.done),
         ]))
     }
     return json.stringify(Arr(items))
-}
-
-fn fieldText(doc: json.Json, key: string) -> string {
-    return match json.lookup(doc, key) {
-        Some(v) => match json.asString(v) { Some(s) => s, None => "" },
-        None    => "",
-    }
-}
-
-fn fieldInt(doc: json.Json, key: string) -> int {
-    return match json.lookup(doc, key) {
-        Some(v) => match json.asFloat(v) { Some(n) => toInt(n), None => 0 },
-        None    => 0,
-    }
-}
-
-fn fieldBool(doc: json.Json, key: string) -> bool {
-    return match json.lookup(doc, key) {
-        Some(v) => match json.asBool(v) { Some(b) => b, None => false },
-        None    => false,
-    }
 }
 
 fn load() {
@@ -237,9 +216,9 @@ fn load() {
         Err(e) => dom.warn("stored tasks are not readable (${e}) — starting fresh")
         Ok(doc) => {
             for item in json.items(doc) {
-                let id = fieldInt(item, "id")
-                push(tasks, Task { id: id, title: fieldText(item, "title"),
-                                   done: fieldBool(item, "done") })
+                let id = json.intAt(item, "id")
+                push(tasks, Task { id: id, title: json.textAt(item, "title"),
+                                   done: json.boolAt(item, "done") })
                 nextId = if id >= nextId { id + 1 } else { nextId }
             }
         }
@@ -252,66 +231,21 @@ fn save() {
 
 // ── styling ───────────────────────────────────────────────────────────
 //
-// The property names are functions, so a misspelling is a compile error rather
-// than a rule the browser quietly drops.
+// css.base() is the forty lines every page needs to look like a page. What is
+// left here is what is actually particular to this one.
 
 fn styles() -> [css.Block] {
-    return [
-        css.rule(":root", [css.colorScheme("light dark")]),
-        css.rule("body", [
-            css.font("16px/1.5 system-ui, sans-serif"),
-            css.maxWidth("34rem"),
-            css.margin("3rem auto"),
-            css.padding("0 1rem"),
-        ]),
-        css.rule("h1", [css.fontSize("1.4rem"), css.marginBottom(".2rem")]),
-        css.rule(".sub", [css.marginTop("0"), css.opacity(".7"), css.fontSize(".9rem")]),
-
-        css.rule("form", [css.display("flex"), css.gap(".5rem"), css.margin("1.2rem 0 .8rem")]),
-        css.rule("input", [
-            css.flex("1"), css.padding(".5rem .7rem"),
-            css.border("1px solid #8886"), css.radius(".4rem"),
-            css.background("transparent"), css.color("inherit"), css.font("inherit"),
-        ]),
-        css.rule("button", [
-            css.padding(".5rem .9rem"), css.border("1px solid #8886"),
-            css.radius(".4rem"), css.background("transparent"),
-            css.color("inherit"), css.font("inherit"), css.cursor("pointer"),
-        ]),
-        css.rule("button:hover", [css.background("#8882")]),
-
+    return css.with(css.base(), [
         css.rule("nav", [css.display("flex"), css.gap(".4rem"),
                          css.fontSize(".85rem"), css.marginBottom(".8rem")]),
         css.rule("nav a", [css.padding(".2rem .6rem"), css.radius(".3rem"),
-                           css.textDecoration("none"), css.color("inherit"),
-                           css.opacity(".6")]),
+                           css.textDecoration("none"), css.opacity(".6")]),
         css.rule("nav a.on", [css.opacity("1"), css.background("#8883")]),
-
-        css.rule("ul", [css.listStyle("none"), css.padding("0"), css.margin("0"),
-                        css.border("1px solid #8884"), css.radius(".5rem")]),
-        css.rule("li", [css.display("flex"), css.align("center"), css.gap(".6rem"),
-                        css.padding(".45rem .6rem"), css.borderBottom("1px solid #8882")]),
-        css.rule("li:last-child", [css.borderBottom("0")]),
-        css.rule("li span", [css.flex("1")]),
-        css.rule("li.done span", [css.opacity(".45"), css.textDecoration("line-through")]),
-        css.rule("li.empty", [css.opacity(".5"), css.fontStyle("italic"),
-                              css.justify("center")]),
-        css.rule("li button", [css.border("0"), css.padding(".15rem .45rem"),
-                               css.fontSize("1rem"), css.opacity(".6")]),
-        css.rule("li button:hover", [css.opacity("1")]),
-
-        css.rule(".status", [css.display("flex"), css.justify("space-between"),
-                             css.align("center"), css.gap(".5rem"),
-                             css.fontSize(".85rem"), css.opacity(".75"),
-                             css.marginTop(".8rem")]),
-        css.rule(".status .message", [css.flex("1"), css.textAlign("center")]),
-        css.rule(".status button", [css.padding(".3rem .6rem")]),
-
         css.media("(max-width: 30rem)", [
             css.rule("body", [css.margin("1.5rem auto")]),
             css.rule("h1", [css.fontSize("1.2rem")]),
         ]),
-    ]
+    ])
 }
 
 // Readable from JavaScript, so the host page can ask Klang how it is doing.

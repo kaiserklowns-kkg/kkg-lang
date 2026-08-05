@@ -67,7 +67,8 @@ const submitForm = () => app.fire("submit", all().find((n) => n.tag === "form"))
 const click = (label) => app.fire("click", byText("button", label));
 const clickIn = (row, label) =>
   app.fire("click", row.children.find((c) => c.textContent.trim() === label));
-const status = () => all().find((n) => n.classes.has("status")).textContent;
+// `.row` is what std/css's base sheet calls a status line.
+const status = () => all().find((n) => n.classes.has("row")).textContent;
 
 const Module = require(path);
 
