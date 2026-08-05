@@ -22,6 +22,17 @@ grep -q "1 of 2 left" demo-cli/out.txt || fail "cli printed something unexpected
 grep -q "parsed 42" demo-cli/out.txt || fail "cli's Result example did not work"
 echo "  cli     runs"
 
+# ── build: a binary the OS runs, with no trace of JavaScript ──────────
+#
+# Klang is a compiled language, and "compiled" has to mean something checkable:
+# an executable file, and nothing of the web toolchain inside it.
+(cd demo-cli && "$KLANGC" build src/main.kkg -o prog > /dev/null) || fail "build produced nothing"
+[ -x demo-cli/prog ] || fail "the build output is not executable"
+demo-cli/prog | grep -q "1 of 2 left" || fail "the built binary misbehaved"
+grep -q "klang_js\|emscripten\|UTF8ToString" demo-cli/.klang/main.c \
+  && fail "a program with no 'js fn' still carries JavaScript-boundary code"
+echo "  build   an executable, with no JavaScript in it"
+
 # ── server: it has to build, and the generated C has to be clean ──────
 "$KLANGC" new demo-server --kind server > /dev/null
 (cd demo-server && "$KLANGC" src/main.kkg -o out.c > /dev/null) || fail "server did not compile"

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.19)
+# Klang Language Spec (v0.20)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -30,8 +30,15 @@
   [Concurrency](#concurrency).
 - **Generics are real**, not just syntax: the compiler monomorphizes — each instantiation of
   a generic function/struct with a concrete type gets its own generated code.
-- **Backend: transpile to C.** `.kkg` → C → whatever C compiler is on the host. This is what
-  makes "every platform" achievable without writing N native backends up front.
+- **Klang compiles to native executables.** `klangc build` produces a binary the
+  operating system runs directly, linked against nothing but the C library — no runtime
+  to ship, no interpreter, no JavaScript. `--static` needs not even libc.
+- **C is the intermediate form**, the way assembly is for a traditional compiler:
+  `.kkg` → C → whatever C compiler is on the host. That is what makes "every platform"
+  achievable without writing N native backends up front, and it is why the same source
+  also reaches the browser through emcc. The C is kept in `.klang/` so it can be read;
+  handling it is not part of using the language. A program that never mentions
+  JavaScript has no JavaScript-boundary code emitted into it at all.
 
 ## Syntax tour
 
@@ -728,7 +735,23 @@ const PORT = 8080
 A module-level `let` without `mut` is rejected, because it would say nothing `const`
 does not.
 
-### Starting, and running
+### Building a native program
+
+```sh
+klangc build src/main.kkg      # -> ./main
+klangc build src/main.kkg -o serve --static
+klangc run src/main.kkg         # build and execute
+```
+
+The output is an executable. `--static` links libc in so it needs nothing
+installed; `--debug` skips optimization and keeps symbols. The libraries an
+`extern link` asked for, and `-lpthread` when the program spawns, are worked out
+rather than remembered.
+
+The intermediate C is left in `.klang/` for reading. `klangc <file> -o out.c`
+emits it on its own, which is what the compiler's own tests use.
+
+### Starting, and running a page
 
 ```sh
 klangc new myapp        # a project that already runs
@@ -911,7 +934,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.19, Phase 18 complete)
+## Implemented today (v0.20, Phase 19 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -943,6 +966,16 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 19 additions — `klangc build`**
+- **`klangc build`** — a native executable, directly. The C stopped being something
+  you handle: `-o`, `--debug`, `--static`, and the right `-l` flags worked out from
+  what the program actually uses.
+- **A program with no `js fn` emits no JavaScript-boundary code at all** — not dead
+  code the linker strips, nothing written. `make check` asserts it, along with the
+  build producing a file that is executable and runs.
+- A Klang binary's whole dependency list is libc and libm; `--static` removes even
+  those. Measured: a scaffolded cli program is 41 KB.
 
 **Phase 18 additions — stylesheets**
 - Plain CSS always worked, being a static file; the scaffold now writes one and

@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.19 — Phase 18 complete
+## Status: v0.20 — Phase 19 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -101,13 +101,18 @@ aspirational.
   compiles it, with `@source` pointed at `src/**/*.kkg` so the class names Klang
   writes into string literals are actually found. Any other pipeline works by
   producing `style.css` itself.
+- **Native executables** — `klangc build` produces a binary the OS runs, linked
+  against nothing but the C library. `--static` needs not even that; `--debug`
+  keeps symbols. C is the intermediate form, kept in `.klang/` to be read rather
+  than handled. A program with no `js fn` has no JavaScript-boundary code emitted
+  into it at all, and `make check` asserts it.
 - **A toolchain, not just a compiler** — `klangc new` writes a project that
-  already runs (web, cli or server); `klangc run` compiles, builds and executes a
-  native program; `klangc web run` does the same for a page — emcc, a dev server,
-  and a browser, in one command. It serves with **bun** if it is installed and
-  node otherwise; both are supported and `make test-web` runs the example under
-  each. The dev server is generated rather than depended on, and `make check`
-  scaffolds all three project kinds and runs them.
+  already runs (web, cli or server); `klangc run` builds and executes; `klangc web
+  run` does the browser equivalent — emcc, a dev server, and a browser, in one
+  command. It serves with **bun** if it is installed and node otherwise; both are
+  supported and `make test-web` runs the example under each. The dev server is
+  generated rather than depended on, and `make check` scaffolds all three project
+  kinds and runs them.
 
 Still missing, in the order it is likely to bite: **traits** (generics are
 unbounded, so a generic function can only do what works for every type), a
@@ -239,10 +244,36 @@ skips itself politely when they are absent.
 
 ## Try it
 
+Klang is a compiled language. `build` produces an executable the operating system
+runs — no runtime to ship, no interpreter, no JavaScript anywhere near it:
+
 ```sh
-bin/klangc new myapp     # a project that already runs
+bin/klangc new myapp --kind cli
 cd myapp
-klangc web run           # build it, serve it, open a browser
+klangc build src/main.kkg      # -> ./main, 41 KB
+./main
+```
+
+```
+$ ldd main
+    libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6
+    libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6
+```
+
+That is the whole dependency list. `--static` links even those in, so the binary
+runs on a machine with nothing installed. `--debug` skips optimization and keeps
+symbols. `klangc run` builds and executes in one step.
+
+C is the intermediate form, the way assembly is for a traditional compiler; it is
+kept in `.klang/` to be read, not handled. A program with no `js fn` has no
+JavaScript-boundary code emitted into it at all — `make check` asserts that.
+
+For the browser, the same source goes the other way:
+
+```sh
+bin/klangc new mypage          # --kind web is the default
+cd mypage
+klangc web run                 # emcc, a dev server, a browser
 ```
 
 `new` writes a working program, not a folder of empty files:
@@ -250,18 +281,18 @@ klangc web run           # build it, serve it, open a browser
 ```
 myapp/
   src/main.kkg      the program
-  web/index.html    the page
+  web/index.html    the page          (--kind web)
+  web/style.css     or input.css, with --css tailwind
   README.md         how to run this one
   .gitignore
 ```
 
-`--kind cli` gives a console program and `--kind server` an HTTP server; both run
-with `klangc run`. All three are built and executed by `make check`.
-
-Or point the compiler at a file directly:
+`--kind cli`, `--kind server` and `--kind web` are all built and executed by
+`make check`. Or point the compiler at a file directly:
 
 ```sh
-bin/klangc run examples/phase2.kkg
+bin/klangc build examples/phase2.kkg
+bin/klangc run examples/server.kkg
 bin/klangc web run examples/web.kkg
 ```
 
