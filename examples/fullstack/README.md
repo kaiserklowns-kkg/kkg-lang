@@ -20,24 +20,36 @@ klangc web run examples/fullstack/app.kkg     # http://localhost:8080
 
 ### Without a toolchain installed
 
-Klang needs a C compiler, and the browser half needs Emscripten. If you have
-neither — on Windows, say — Docker has both, and the two ports are published so
-the browser on your own machine reaches them:
+Klang compiles through C, and the browser half needs Emscripten. If you have
+neither — on Windows, say — [tools/klangc.cmd](../../tools/klangc.cmd) runs the
+real compiler inside Docker and passes your arguments through, so every command
+above means the same thing. There is a `tools/klangc` for Unix hosts too.
 
-```sh
-docker run --rm -p 8080:8080 -p 8099:8099 -v "$PWD":/w -w /w emscripten/emsdk bash -c '
-  gcc -std=c99 -O2 -o bin/klangc src/klangc.c -lm
-  ./bin/klangc build examples/fullstack/api.kkg -o /tmp/api
-  /tmp/api &
-  ./bin/klangc web run examples/fullstack/app.kkg --no-open --port 8080'
+```powershell
+$env:Path += ";D:\Klowns-Language-Klang-\tools"
 ```
 
-Then open <http://localhost:8080>. The first run compiles the compiler and both
-programs, so give it half a minute. `--no-open` is there because the container
-has no browser to open — that part is yours.
+Then two terminals, because the two halves are two programs:
 
-Note that `bin/klangc` built this way is a Linux binary. Build it again with a
-Windows compiler if you want to run `klangc` outside the container.
+```powershell
+# terminal 1 — the API, on 8099
+klangc run examples\fullstack\api.kkg
+
+# terminal 2 — the page, on 8080
+klangc web run examples\fullstack\app.kkg --no-open
+```
+
+Open <http://localhost:8080>. Each wrapper publishes the port its command needs —
+`run` gets 8099 and `web` gets 8080 — because two containers cannot both claim
+the same one. `--no-open` is there because the container has no browser to open;
+that part is yours. The compiler is built on first use, once, and skipped
+afterwards unless `src/klangc.c` has changed.
+
+Ctrl-C stops either of them.
+
+Note that the `bin/klangc-linux` this produces is a Linux binary, and so is
+anything `klangc build` writes. Build `src/klangc.c` with a Windows compiler if
+you want a `klangc.exe` and native `.exe` output.
 
 The page is served from one port and the API answers on another, so the browser
 asks permission first. `api.kkg` answers the preflight and puts the CORS headers

@@ -1,0 +1,38 @@
+#!/bin/sh
+# klangc, on a machine without a C compiler or Emscripten installed.
+#
+# Runs the real compiler inside the emscripten/emsdk image and passes your
+# arguments straight through, so `klangc web run` here means what it means
+# everywhere else. The Windows equivalent is tools\klangc.cmd.
+#
+#     tools/klangc new myapp
+#     tools/klangc web run examples/fullstack/app.kkg
+#
+# Put tools/ on PATH and it is just `klangc`.
+
+set -e
+
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+HERE=$(pwd)
+
+case "$HERE" in
+    "$REPO"|"$REPO"/*) ;;
+    *) echo "klangc: run this from inside $REPO" >&2; exit 1 ;;
+esac
+REL=${HERE#"$REPO"}
+
+# A server has to be reachable from your browser, so the two commands that run one
+# publish a port — and different ports, because two containers cannot both claim
+# the same one. `web run` serves the page on 8080; `run` is how a Klang server is
+# started, and the examples listen on 8099.
+PORTS=""
+case "$1" in
+    web) PORTS="-p 8080:8080" ;;
+    run) PORTS="-p 8099:8099" ;;
+esac
+
+# No -it: it fails whenever stdin is not a terminal, and nothing here reads
+# input. Ctrl-C still stops a running server, because docker forwards signals to
+# the container unless told otherwise.
+exec docker run --rm $PORTS -v "$REPO":/w -w "/w$REL" emscripten/emsdk \
+     sh /w/tools/klangc-in-docker.sh "$@"

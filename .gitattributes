@@ -1,0 +1,8 @@
+# Shell scripts run inside a Linux container. A CRLF line ending there is not a
+# style question — `sh` reports "bad interpreter" or fails on the first line — so
+# these keep LF whatever the checkout does.
+*.sh text eol=lf
+tools/klangc text eol=lf
+
+# Batch files are read by cmd.exe, which wants CRLF.
+*.cmd text eol=crlf
