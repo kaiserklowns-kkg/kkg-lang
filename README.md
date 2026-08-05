@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.10 — Phase 9 complete
+## Status: v0.11 — Phase 10 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -66,7 +66,7 @@ aspirational.
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg).
 
-Not yet: traits, concurrency, and all tooling
+Not yet: traits, and all tooling
 (REPL, formatter, linter, package manager).
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
@@ -151,7 +151,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase6.kkg](examples/phase6.kkg),
 [examples/phase7.kkg](examples/phase7.kkg),
 [examples/phase8.kkg](examples/phase8.kkg),
-[examples/phase9.kkg](examples/phase9.kkg), and
+[examples/phase9.kkg](examples/phase9.kkg),
+[examples/phase10.kkg](examples/phase10.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

@@ -1,0 +1,78 @@
+// Phase 10: doing several things at once, safely.
+//
+// `spawn e` runs e on another thread and hands back a Task; `await` waits for it.
+// The one rule: nothing mutable is ever shared. Numbers and strings are immutable,
+// so they cross for free; arrays, maps and structs are copied on the way in. Two
+// threads therefore never hold the same object, and a data race is not something
+// you have to be careful about — it is not expressible.
+
+import "std/list"
+import "std/string" as str
+
+struct Doc {
+    id: int,
+    title: string,
+    words: [string],
+}
+
+fn makeDoc(i: int) -> Doc {
+    let words = str.split("the quick brown fox jumps over ${i} lazy dogs", " ")
+    return Doc { id: i, title: "doc-${i}", words: words }
+}
+
+// A worker: allocates heavily, so collections happen while its siblings run.
+fn countLong(docs: [Doc], minLen: int) -> int {
+    let mut n = 0
+    for d in docs {
+        let upper = d.words.map(|w| w.toUpper())
+        n += upper.filter(|w| w.len() > minLen).len()
+    }
+    return n
+}
+
+// Workers can return whole data structures. Nothing is copied on the way out —
+// the worker has finished, so the result has exactly one owner again.
+fn titlesOf(docs: [Doc]) -> [string] {
+    return docs.map(|d| d.title)
+}
+
+fn main() {
+    let mut docs: [Doc] = []
+    for i in 0..300 {
+        push(docs, makeDoc(i))
+    }
+
+    // ── four workers over the same data ───────────────────────────────
+    let a = spawn countLong(docs, 3)
+    let b = spawn countLong(docs, 4)
+    let c = spawn countLong(docs, 5)
+    let titles = spawn titlesOf(docs)
+
+    // The parent goes on working — and allocating — while they run.
+    let mut parentWork = 0
+    for i in 0..100000 {
+        parentWork += "busy-${i}".len()
+    }
+
+    println("len > 3   = ${await a}")
+    println("len > 4   = ${await b}")
+    println("len > 5   = ${await c}")
+
+    let got = await titles
+    println("titles    = ${got.len()}, first ${got[0]}, last ${got[got.len() - 1]}")
+    println("parent    = ${parentWork}")
+
+    // ── the isolation is real ─────────────────────────────────────────
+    // Each worker received its own copy, so nothing it did is visible here.
+    assert(docs.len() == 300, "the parent's data is its own")
+    assert(docs[0].title == "doc-0", "and it was not touched")
+
+    // A task's value is just a value: it composes with everything else.
+    let sizes = list.map([100, 200, 400], |n| n)
+    let jobs = list.map(sizes, |n| n * 2)
+    println("sizes     = ${jobs.map(|n| "${n}").join(", ")}")
+
+    gcCollect()
+    println("live      = ${gcHeap()} bytes")
+    println("phase10: ok")
+}

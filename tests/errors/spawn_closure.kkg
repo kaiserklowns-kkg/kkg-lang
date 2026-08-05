@@ -1,0 +1,5 @@
+fn main() {
+    let f = |x: int| x + 1
+    let t = spawn f(1)
+    println("${await t}")
+}

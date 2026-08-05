@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.10)
+# Klang Language Spec (v0.11)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -23,9 +23,11 @@
   - `match` on an enum (including `Option`/`Result`) must cover every case, or the compiler
     rejects it — no silently-forgotten branches.
   - Variables are immutable by default (`let`); `let mut` is required to reassign.
-- **Ownership is enforced in exactly one place:** values passed across a thread/channel
-  boundary can't be used from the sending side afterward. This is the one data-race guard
-  kept from Rust's model; everywhere else, ownership is not tracked.
+- **Nothing mutable is ever shared between threads.** This turned out to be a stronger
+  guarantee than the move rule originally planned, and a simpler one: immutable values
+  cross for free, mutable ones are copied, so two threads never hold the same object.
+  A data race is not something to be careful about — it cannot be written. See
+  [Concurrency](#concurrency).
 - **Generics are real**, not just syntax: the compiler monomorphizes — each instantiation of
   a generic function/struct with a concrete type gets its own generated code.
 - **Backend: transpile to C.** `.kkg` → C → whatever C compiler is on the host. This is what
@@ -555,19 +557,60 @@ across 120k allocations and asserts every field survived. It is verified at `-O0
 through `-O3` and `-Os`, because conservative collection is exactly the kind of thing
 that can pass at one optimization level and fail at another.
 
-### Concurrency (target)
+## Concurrency
+
+`spawn e` runs `e` on another OS thread and hands back a `Task<T>`; `await` waits for
+it and gives you the value.
 
 ```kkg
-let data = [1, 2, 3]
-let ch = channel()
-spawn {
-    ch.send(data)      // data's ownership moves into the channel
-}
-// data is no longer usable here — compiler error if you try
-let received = ch.receive()
+let a = spawn countWords(docs)
+let b = spawn countLines(docs)
+println("${await a} words, ${await b} lines")
 ```
 
-## Implemented today (v0.10, Phase 9 complete)
+**The rule is that nothing mutable is ever shared.** Numbers, booleans and strings are
+immutable, so they cross for free. Arrays, maps, structs and enums are deep-copied on
+the way in. Two threads therefore never hold a reference to the same object, and a data
+race is not something to be careful about — it cannot be expressed.
+
+This is deliberately a stronger promise than Rust makes. Rust prevents races by proving
+that sharing is disciplined, which needs a borrow checker to be right and has
+`unsafe impl Send` as an escape. Klang removes the sharing instead, so there is nothing
+left to prove and no escape hatch to get wrong. The price is the copy, and it is a real
+price — the design pays it deliberately rather than trading it for an analysis Klang
+does not have.
+
+Results come back **without** a copy. By the time `await` returns, the worker has
+finished, so its result has exactly one owner again:
+
+```kkg
+fn titlesOf(docs: [Doc]) -> [string] { return docs.map(|d| d.title) }
+let got = await spawn titlesOf(docs)     // no copy on the way out
+```
+
+Two things cannot cross, and the compiler says why:
+
+- **a closure**, because it carries captured state that would be shared — pass the
+  values it needs instead
+- **an `extern type` handle**, because it points at something C owns, which Klang can
+  neither copy nor reason about
+
+### How the collector copes
+
+A conservative collector has to see every thread's stack, and no thread may be moving
+objects around while it sweeps. Threads agree to stop at **safepoints**: on allocation,
+at loop back-edges, and around any blocking call. A thread that parks records where its
+stack currently ends and spills its registers, so the collector scans it exactly as it
+scans its own.
+
+`await` parks before joining. Without that, a thread sitting in `pthread_join` would
+never reach a safepoint and a collection started elsewhere would wait forever.
+
+**Programs that never spawn pay nothing for any of this.** The thread runtime, the
+locking and the safepoints are only emitted when the program actually contains a
+`spawn`, so single-threaded code keeps exactly the performance it had.
+
+## Implemented today (v0.11, Phase 10 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -599,6 +642,18 @@ let received = ch.receive()
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 10 additions — concurrency, with nothing shared**
+- `spawn e` -> `Task<T>` on a real OS thread, and `await` to join
+- **Nothing mutable crosses a thread boundary**: immutables shared, mutables copied,
+  so a data race cannot be written. Stronger than the move rule first planned, and
+  stronger than Rust, which prevents races by proving sharing is disciplined
+- Results come back without a copy — the worker is finished, so there is one owner
+- Closures and extern handles are refused at the boundary, with the reason
+- The collector stops the world at safepoints: allocation, loop back-edges, and
+  around blocking calls; `await` parks before joining so a collection cannot hang
+- pthreads and Win32 behind one interface; none of it emitted unless you spawn
+- Measured: 2.4s of sequential work finishes in 0.93s across four tasks
 
 **Phase 9 additions — arithmetic that cannot lie**
 - **Checked integer arithmetic**: `+ - * / %` and unary `-` trap on overflow instead

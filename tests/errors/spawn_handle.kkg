@@ -1,0 +1,8 @@
+extern type Handle
+extern fn grab() -> Handle
+fn use1(h: Handle) -> int { return 1 }
+fn main() {
+    let h = unsafe { grab() }
+    let t = spawn use1(h)
+    println("${await t}")
+}

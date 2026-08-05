@@ -1,8 +1,8 @@
 CC ?= gcc
 CFLAGS ?= -std=c99 -Wall -Wextra -O2
 # Examples that call C may need libraries; klangc prints what they are.
-LDLIBS ?= -lm
-EXAMPLES := hello basics phase1 phase2 gc modules phase5 phase6 phase7 phase8 phase9
+LDLIBS ?= -lm -lpthread
+EXAMPLES := hello basics phase1 phase2 gc modules phase5 phase6 phase7 phase8 phase9 phase10
 
 all: bin/klangc
 

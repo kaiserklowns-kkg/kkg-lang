@@ -90,7 +90,7 @@ typedef enum {
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_ANDAND, TK_OROR, TK_NOT, TK_PIPE,
     TK_PLUSEQ, TK_MINUSEQ, TK_STAREQ, TK_SLASHEQ, TK_PERCENTEQ,
-    TK_BREAK, TK_CONTINUE, TK_CONST, TK_EXTERN, TK_UNSAFE, TK_TYPE
+    TK_BREAK, TK_CONTINUE, TK_CONST, TK_EXTERN, TK_UNSAFE, TK_TYPE, TK_SPAWN, TK_AWAIT
 } TokKind;
 
 /* One chunk of a string literal. `expr` is the source text inside `${...}`,
@@ -164,6 +164,7 @@ static Token lex_next(Lexer *lx) {
             {"pub", TK_PUB}, {"import", TK_IMPORT}, {"as", TK_AS},
             {"break", TK_BREAK}, {"continue", TK_CONTINUE}, {"const", TK_CONST},
             {"extern", TK_EXTERN}, {"unsafe", TK_UNSAFE}, {"type", TK_TYPE},
+            {"spawn", TK_SPAWN}, {"await", TK_AWAIT},
         };
         for (size_t i = 0; i < sizeof kws / sizeof kws[0]; i++) {
             if (strcmp(text, kws[i].kw) == 0) { free(text); return make_tok(kws[i].k, line); }
@@ -348,7 +349,7 @@ static char *key_mangle(const char *key) {
 /* ───────────────────────── types ───────────────────────── */
 
 typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_MAP,
-               TY_FN, TY_VAR, TY_UNKNOWN } TyKind;
+               TY_FN, TY_TASK, TY_VAR, TY_UNKNOWN } TyKind;
 
 typedef struct Type Type;
 struct Type {
@@ -387,10 +388,11 @@ static Type *ty_fn(void) { return ty_new(TY_FN); }
 static int ty_nparams(const Type *t) { return t->args.count - 1; }
 static Type *ty_param(const Type *t, int i) { return VEC_PTR(&t->args, i, Type); }
 static Type *ty_ret(const Type *t) { return VEC_PTR(&t->args, t->args.count - 1, Type); }
+static Type *ty_task(Type *r) { Type *t = ty_new(TY_TASK); VEC_PUSH_PTR(&t->args, r); return t; }
 
 static bool ty_eq(const Type *a, const Type *b) {
     if (a->kind != b->kind) return false;
-    if (a->kind == TY_ARRAY) return ty_eq(ty_elem(a), ty_elem(b));
+    if (a->kind == TY_ARRAY || a->kind == TY_TASK) return ty_eq(ty_elem(a), ty_elem(b));
     if (a->kind == TY_MAP) return ty_eq(ty_key(a), ty_key(b)) && ty_eq(ty_val(a), ty_val(b));
     if (a->kind == TY_FN) {
         if (a->args.count != b->args.count) return false;
@@ -425,6 +427,7 @@ static const char *ty_str(const Type *t) {
         case TY_STRING: return "string";
         case TY_UNKNOWN: return "<unknown>";
         case TY_ARRAY: snprintf(buf, 256, "[%s]", ty_str(ty_elem(t))); return buf;
+        case TY_TASK: snprintf(buf, 256, "Task<%s>", ty_str(ty_elem(t))); return buf;
         case TY_FN: {
             char ps[180] = "";
             for (int i = 0; i < ty_nparams(t); i++) {
@@ -462,6 +465,7 @@ static void ty_mangle_into(const Type *t, SB *sb) {
         case TY_STRING: sb_append(sb, "string"); return;
         case TY_VAR: sb_append(sb, t->name); return;
         case TY_ARRAY: sb_append(sb, "arr_"); ty_mangle_into(ty_elem(t), sb); return;
+        case TY_TASK: sb_append(sb, "task_"); ty_mangle_into(ty_elem(t), sb); return;
         case TY_MAP:
             sb_append(sb, "map_"); ty_mangle_into(ty_key(t), sb);
             sb_append(sb, "_"); ty_mangle_into(ty_val(t), sb);
@@ -492,7 +496,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD, EX_UNSAFE
+    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD, EX_UNSAFE, EX_SPAWN, EX_AWAIT
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -784,6 +788,7 @@ static Vec parse_type_params(Parser *p) {
 }
 
 static Expr *parse_expr(Parser *p);
+static Expr *parse_unary(Parser *p);
 static Vec parse_block(Parser *p);
 
 static Pattern parse_pattern(Parser *p) {
@@ -873,6 +878,22 @@ static Expr *parse_primary(Parser *p) {
         Expr *e = new_expr(EX_STRING, line);
         e->sval = tok.text;
         return e;
+    }
+    if (p_check(p, TK_SPAWN)) {
+        /* `spawn e` runs e on another thread. It becomes a closure over whatever e
+           mentions, so all the capture machinery is reused. */
+        p_advance(p);
+        Expr *s = new_expr(EX_SPAWN, line);
+        Expr *lam = new_expr(EX_LAMBDA, line);
+        lam->lhs = parse_expr(p);
+        s->lhs = lam;
+        return s;
+    }
+    if (p_check(p, TK_AWAIT)) {
+        p_advance(p);
+        Expr *a = new_expr(EX_AWAIT, line);
+        a->lhs = parse_unary(p);
+        return a;
     }
     if (p_check(p, TK_UNSAFE)) {
         /* `unsafe { expr }` in expression position; the statement form takes a block. */
@@ -1473,6 +1494,53 @@ static int variant_index(const EnumDecl *ed, const char *name) {
     return -1;
 }
 
+static StructDecl *find_mono_struct(const char *mangled);
+static EnumDecl *find_mono_enum(const char *mangled);
+/* What may cross a thread boundary. Immutable things (numbers, strings) are shared
+   as they are; anything mutable is deep-copied, so no two threads ever reach the
+   same object. Returns why a type cannot cross, or NULL when it can. */
+static const char *crossing_problem(const Type *t) {
+    switch (t->kind) {
+        case TY_INT: case TY_FLOAT: case TY_BOOL: case TY_STRING: return NULL;
+        case TY_ARRAY: return crossing_problem(ty_elem(t));
+        case TY_MAP: {
+            const char *k = crossing_problem(ty_key(t));
+            return k ? k : crossing_problem(ty_val(t));
+        }
+        case TY_FN:
+            return "a closure carries captured state, which would be shared — "
+                   "pass the values it needs instead";
+        case TY_TASK:
+            return "a task handle belongs to the thread that created it";
+        case TY_NAMED: {
+            StructDecl *sd = find_mono_struct(ty_mangle(t));
+            if (sd && sd->is_opaque)
+                return "an extern handle points at something C owns, which Klang "
+                       "cannot copy or reason about";
+            if (sd) {
+                for (int i = 0; i < sd->fields.count; i++) {
+                    const char *w = crossing_problem(((Field *)vec_get(&sd->fields, i))->type);
+                    if (w) return w;
+                }
+                return NULL;
+            }
+            EnumDecl *ed = find_mono_enum(ty_mangle(t));
+            if (ed) {
+                for (int i = 0; i < ed->variants.count; i++) {
+                    Variant *v = vec_get(&ed->variants, i);
+                    for (int j = 0; j < v->payload.count; j++) {
+                        const char *w = crossing_problem(VEC_PTR(&v->payload, j, Type));
+                        if (w) return w;
+                    }
+                }
+                return NULL;
+            }
+            return NULL;
+        }
+        default: return "this type cannot cross a thread boundary";
+    }
+}
+
 /* Which module's body is being type-checked; drives unqualified name resolution. */
 static const char *g_cur_module = MOD_ROOT;
 
@@ -1541,7 +1609,7 @@ static bool unify(Type *pat, Type *actual, Vec *subst) {
         return true;
     }
     if (pat->kind != actual->kind) return false;
-    if (pat->kind == TY_ARRAY) return unify(ty_elem(pat), ty_elem(actual), subst);
+    if (pat->kind == TY_ARRAY || pat->kind == TY_TASK) return unify(ty_elem(pat), ty_elem(actual), subst);
     if (pat->kind == TY_MAP)
         return unify(ty_key(pat), ty_key(actual), subst) && unify(ty_val(pat), ty_val(actual), subst);
     if (pat->kind == TY_FN) {
@@ -1638,6 +1706,8 @@ static Vec g_fn_queue;      /* Vec<FnDecl*> — pending typecheck */
 
 static Vec g_mono_maps;     /* Vec<Type*> — one entry per distinct (key, value) pair */
 static Vec g_mono_fntypes;  /* Vec<Type*> — one entry per distinct signature */
+static Vec g_mono_tasks;    /* Vec<Type*> — one entry per distinct result type */
+static bool g_uses_threads; /* set when the program spawns, gating all thread code */
 
 static bool array_registered(const char *mangled) {
     for (int i = 0; i < g_mono_arrays.count; i++)
@@ -1704,6 +1774,16 @@ static void request_type(Type *t, int line) {
         char *fm = ty_mangle(t);
         if (!fntype_registered(fm)) VEC_PUSH_PTR(&g_mono_fntypes, t);
         free(fm);
+        return;
+    }
+    if (t->kind == TY_TASK) {
+        request_type(ty_elem(t), line);
+        char *tm = ty_mangle(t);
+        bool seen = false;
+        for (int i = 0; i < g_mono_tasks.count; i++)
+            if (strcmp(ty_mangle(VEC_PTR(&g_mono_tasks, i, Type)), tm) == 0) { seen = true; break; }
+        if (!seen) VEC_PUSH_PTR(&g_mono_tasks, t);
+        free(tm);
         return;
     }
     if (t->kind == TY_MAP) {
@@ -2665,6 +2745,34 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
            receiver is looked at once by the method call and again as argument
            zero, so re-checking one has to be a no-op. */
         case EX_CONSTREF: case EX_FNREF: t = e->type; break;
+        case EX_SPAWN: {
+            g_uses_threads = true;
+            Type *ft = tc_expr(e->lhs, sc, NULL);          /* the implicit closure */
+            Type *res = ty_ret(ft);
+            if (res->kind == TY_VOID)
+                fail(e->line, "'spawn' needs an expression that produces a value — "
+                              "have the task return something, even just a count");
+            /* Nothing mutable is shared across the boundary, so each captured value
+               is copied. Only things that cannot be copied meaningfully are refused. */
+            for (int i = 0; i < e->lhs->captures.count; i++) {
+                Field *c = vec_get(&e->lhs->captures, i);
+                const char *why = crossing_problem(c->type);
+                if (why)
+                    fail(e->line, "'%s' cannot cross into a task: %s", c->name, why);
+            }
+            const char *why = crossing_problem(res);
+            if (why) fail(e->line, "a task cannot return this: %s", why);
+            request_type(res, e->line);
+            t = ty_task(res);
+            break;
+        }
+        case EX_AWAIT: {
+            Type *tt = tc_expr(e->lhs, sc, NULL);
+            if (tt->kind != TY_TASK)
+                fail(e->line, "'await' needs a task, got %s", ty_str(tt));
+            t = ty_elem(tt);
+            break;
+        }
         case EX_UNSAFE:
             g_unsafe_depth++;
             t = tc_expr(e->lhs, sc, expected);
@@ -2741,7 +2849,8 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
         }
         default: t = ty_unknown(); break;
     }
-    if (t->kind == TY_NAMED || t->kind == TY_ARRAY || t->kind == TY_MAP || t->kind == TY_FN)
+    if (t->kind == TY_NAMED || t->kind == TY_ARRAY || t->kind == TY_MAP ||
+        t->kind == TY_FN || t->kind == TY_TASK)
         request_type(t, e->line);
     e->type = t;
     return t;
@@ -2974,7 +3083,7 @@ static const char *c_type(const Type *t) {
         case TY_FLOAT: return "double";
         case TY_BOOL: return "bool";
         case TY_STRING: return "char*";
-        case TY_NAMED: case TY_ARRAY: case TY_MAP: case TY_FN: return ty_mangle(t);
+        case TY_NAMED: case TY_ARRAY: case TY_MAP: case TY_FN: case TY_TASK: return ty_mangle(t);
         default: return "void*";
     }
 }
@@ -2987,6 +3096,7 @@ static void indent_to(SB *sb, int n) { for (int i = 0; i < n; i++) sb_append(sb,
 
 static void cg_expr(Expr *e, SB *out, SB *pre, int ind);
 static void cg_stmts(Vec *body, SB *sb, int ind);
+static void copy_expr(const Type *t, const char *val, SB *out);
 
 /* C leaves the order of evaluation between operands unspecified, but Klang
    promises left to right. Anything that could observe the difference — a call —
@@ -3292,6 +3402,33 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
         case EX_UNSAFE:   /* purely a promise to the compiler; no code of its own */
             cg_expr(e->lhs, out, pre, ind);
             break;
+        case EX_SPAWN: {
+            /* Build the closure's environment from *copies*, then hand it to a
+               thread. The parent keeps its originals; nothing is shared. */
+            Expr *lam = e->lhs;
+            char *env = fresh_tmp();
+            indent_to(pre, ind);
+            if (lam->captures.count > 0) {
+                sb_appendf(pre, "_klam%d_env *%s = klang_gc_alloc(sizeof(_klam%d_env));\n",
+                           lam->lam_id, env, lam->lam_id);
+                for (int i = 0; i < lam->captures.count; i++) {
+                    Field *c = vec_get(&lam->captures, i);
+                    SB cp; sb_init(&cp);
+                    copy_expr(c->type, c->name, &cp);
+                    indent_to(pre, ind);
+                    sb_appendf(pre, "%s->%s = %s;\n", env, c->name, cp.data);
+                }
+            } else {
+                sb_appendf(pre, "void *%s = NULL;\n", env);
+            }
+            sb_appendf(out, "%s_spawn(_klam%d, %s)", ty_mangle(e->type), lam->lam_id, env);
+            break;
+        }
+        case EX_AWAIT:
+            sb_appendf(out, "%s_await(", ty_mangle(e->lhs->type));
+            cg_expr(e->lhs, out, pre, ind);
+            sb_append(out, ")");
+            break;
         case EX_MAP_LIT: {
             char *m = ty_mangle(e->type);
             char *tmp = fresh_tmp();
@@ -3550,6 +3687,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             if (cpre.len == 0) {
                 indent_to(sb, ind);
                 sb_appendf(sb, "while (%s) {\n", cval.data);
+            if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
                 cg_stmts(&s->body, sb, ind + 1);
                 indent_to(sb, ind);
                 sb_append(sb, "}\n");
@@ -3560,6 +3698,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
                 sb_append(sb, cpre.data);
                 indent_to(sb, ind + 1);
                 sb_appendf(sb, "if (!(%s)) break;\n", cval.data);
+                if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
                 cg_stmts(&s->body, sb, ind + 1);
                 indent_to(sb, ind);
                 sb_append(sb, "}\n");
@@ -3595,6 +3734,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
                 sb_appendf(sb, "%s %s = %s->data[%s]; (void)%s;\n",
                            c_type(ty_elem(s->expr->type)), s->name, av, idx, s->name);
             }
+            if (g_uses_threads) { indent_to(sb, ind + 1); sb_append(sb, "klang_safepoint();\n"); }
             cg_stmts(&s->body, sb, ind + 1);
             indent_to(sb, ind);
             sb_append(sb, "}\n");
@@ -3658,6 +3798,49 @@ static void cg_stmts(Vec *body, SB *sb, int ind) {
  * String literals live in .rodata rather than the heap, so they simply never appear
  * in the object set and are ignored — no interning pass needed.
  */
+/* Threads, behind one tiny interface so the rest of the runtime never sees the
+   platform difference. Emitted only when the program actually spawns. */
+static const char *THREAD_RUNTIME =
+    "/* ── threads ───────────────────────────────────────────────────────── */\n"
+    "#if defined(_WIN32)\n"
+    "  #include <windows.h>\n"
+    "  typedef HANDLE k_thread_t;\n"
+    "  typedef CRITICAL_SECTION k_mutex_t;\n"
+    "  typedef CONDITION_VARIABLE k_cond_t;\n"
+    "  #define K_MUTEX_INIT(m)   InitializeCriticalSection(m)\n"
+    "  #define K_LOCK(m)         EnterCriticalSection(m)\n"
+    "  #define K_UNLOCK(m)       LeaveCriticalSection(m)\n"
+    "  #define K_COND_INIT(c)    InitializeConditionVariable(c)\n"
+    "  #define K_WAIT(c, m)      SleepConditionVariableCS(c, m, INFINITE)\n"
+    "  #define K_SIGNAL(c)       WakeConditionVariable(c)\n"
+    "  #define K_BROADCAST(c)    WakeAllConditionVariable(c)\n"
+    "  typedef DWORD k_ret_t;\n"
+    "  #define K_THREAD_CALL WINAPI\n"
+    "  static int k_thread_start(k_thread_t *t, k_ret_t (K_THREAD_CALL *fn)(void *), void *arg) {\n"
+    "      *t = CreateThread(NULL, 0, fn, arg, 0, NULL);\n"
+    "      return *t != NULL;\n"
+    "  }\n"
+    "  static void k_thread_join(k_thread_t t) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }\n"
+    "#else\n"
+    "  #include <pthread.h>\n"
+    "  typedef pthread_t k_thread_t;\n"
+    "  typedef pthread_mutex_t k_mutex_t;\n"
+    "  typedef pthread_cond_t k_cond_t;\n"
+    "  #define K_MUTEX_INIT(m)   pthread_mutex_init(m, NULL)\n"
+    "  #define K_LOCK(m)         pthread_mutex_lock(m)\n"
+    "  #define K_UNLOCK(m)       pthread_mutex_unlock(m)\n"
+    "  #define K_COND_INIT(c)    pthread_cond_init(c, NULL)\n"
+    "  #define K_WAIT(c, m)      pthread_cond_wait(c, m)\n"
+    "  #define K_SIGNAL(c)       pthread_cond_signal(c)\n"
+    "  #define K_BROADCAST(c)    pthread_cond_broadcast(c)\n"
+    "  typedef void *k_ret_t;\n"
+    "  #define K_THREAD_CALL\n"
+    "  static int k_thread_start(k_thread_t *t, k_ret_t (*fn)(void *), void *arg) {\n"
+    "      return pthread_create(t, NULL, fn, arg) == 0;\n"
+    "  }\n"
+    "  static void k_thread_join(k_thread_t t) { pthread_join(t, NULL); }\n"
+    "#endif\n\n";
+
 static const char *GC_RUNTIME =
     "/* ── Klang GC: conservative mark-sweep ─────────────────────────────── */\n"
     "typedef struct KObj { struct KObj *next; size_t size; unsigned char mark; } KObj;\n"
@@ -3733,16 +3916,130 @@ static const char *GC_RUNTIME =
     "        k_mark(cand);\n"
     "    }\n"
     "}\n"
+    "\n";
+
+/* With more than one thread the collector must see every thread's stack, and no
+   thread may be mutating the heap while it sweeps. Threads reach agreement at
+   safepoints: allocation, loop back-edges, and any blocking call. A thread that
+   parks records where its stack currently ends and spills its registers, so the
+   collector can scan it exactly as it scans its own. */
+static const char *GC_THREADS =
+    "/* ── stopping the world ────────────────────────────────────────────── */\n"
+    "#define K_MAX_THREADS 256\n"
+    "typedef struct {\n"
+    "    void *bottom;     /* where this thread's stack begins */\n"
+    "    void *top;        /* how far it had grown when it parked */\n"
+    "    jmp_buf regs;     /* its callee-saved registers, spilled */\n"
+    "    int in_use, parked;\n"
+    "} KThread;\n"
+    "KThread k_threads[K_MAX_THREADS];\n"
+    "int k_nthreads = 0, k_nparked = 0, k_stop = 0;\n"
+    "k_mutex_t k_gc_mutex;\n"
+    "k_cond_t k_cond_parked, k_cond_resume;\n"
+    "#if defined(_WIN32)\n"
+    "  DWORD k_self_key;\n"
+    "  #define K_SELF_GET() ((KThread *)TlsGetValue(k_self_key))\n"
+    "  #define K_SELF_SET(p) TlsSetValue(k_self_key, p)\n"
+    "  #define K_SELF_INIT() (k_self_key = TlsAlloc())\n"
+    "#else\n"
+    "  pthread_key_t k_self_key;\n"
+    "  #define K_SELF_GET() ((KThread *)pthread_getspecific(k_self_key))\n"
+    "  #define K_SELF_SET(p) pthread_setspecific(k_self_key, p)\n"
+    "  #define K_SELF_INIT() pthread_key_create(&k_self_key, NULL)\n"
+    "#endif\n"
     "\n"
-    "void klang_gc_collect(void) {\n"
-    "    if (!k_stack_bottom) return;   /* before main() set the anchor */\n"
+    "KThread *klang_thread_register(void *bottom) {\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    KThread *t = NULL;\n"
+    "    for (int i = 0; i < K_MAX_THREADS; i++)\n"
+    "        if (!k_threads[i].in_use) { t = &k_threads[i]; break; }\n"
+    "    if (!t) { fprintf(stderr, \"klang: too many threads\\n\"); exit(1); }\n"
+    "    t->in_use = 1; t->parked = 0; t->bottom = bottom; t->top = bottom;\n"
+    "    k_nthreads++;\n"
+    "    K_SELF_SET(t);\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "    return t;\n"
+    "}\n"
+    "void klang_thread_unregister(KThread *t) {\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    t->in_use = 0;\n"
+    "    k_nthreads--;\n"
+    "    K_SIGNAL(&k_cond_parked);   /* one fewer thread for a collector to wait on */\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "}\n"
+    "\n"
+    "/* Park until the collector is done. Must be called with the GC mutex held. */\n"
+    "void k_park_locked(KThread *self, void *top) {\n"
+    "    while (k_stop) {\n"
+    "        if (!self->parked) {\n"
+    "            self->top = top; self->parked = 1; k_nparked++;\n"
+    "            K_SIGNAL(&k_cond_parked);\n"
+    "        }\n"
+    "        K_WAIT(&k_cond_resume, &k_gc_mutex);\n"
+    "    }\n"
+    "    if (self->parked) { self->parked = 0; k_nparked--; }\n"
+    "}\n"
+    "/* Emitted at loop back-edges, so a thread that allocates nothing still yields. */\n"
+    "void klang_safepoint(void) {\n"
+    "    if (!k_stop) return;\n"
+    "    KThread *self = K_SELF_GET();\n"
+    "    if (!self) return;\n"
+    "    jmp_buf regs;\n"
+    "    memset(&regs, 0, sizeof regs);\n"
+    "    setjmp(regs);\n"
+    "    memcpy(self->regs, regs, sizeof regs);\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    k_park_locked(self, &regs);\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "}\n"
+    "/* Around a blocking call: the thread holds no live registers the collector\n"
+    "   cannot already see on its stack, so it can be scanned while it waits. */\n"
+    "void klang_gc_block_enter(void) {\n"
+    "    KThread *self = K_SELF_GET();\n"
+    "    if (!self) return;\n"
+    "    jmp_buf regs;\n"
+    "    memset(&regs, 0, sizeof regs);\n"
+    "    setjmp(regs);\n"
+    "    memcpy(self->regs, regs, sizeof regs);\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    self->top = &regs; self->parked = 1; k_nparked++;\n"
+    "    K_SIGNAL(&k_cond_parked);\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "}\n"
+    "void klang_gc_block_exit(void) {\n"
+    "    KThread *self = K_SELF_GET();\n"
+    "    if (!self) return;\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    if (self->parked) { self->parked = 0; k_nparked--; }\n"
+    "    k_park_locked(self, &self);   /* a collection may have started meanwhile */\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "}\n\n";
+
+/* Emitted after the thread machinery, because collecting has to know about it. */
+static const char *GC_COLLECT =
+    "/* Mark from every root, sweep, rebuild the address set. The caller has already\n"
+    "   made sure no other thread is running Klang code. */\n"
+    "void k_collect_core(void) {\n"
     "    jmp_buf regs;\n"
     "    memset(&regs, 0, sizeof regs);\n"
     "    setjmp(regs);                  /* force callee-saved registers onto the stack */\n"
     "    for (KObj *o = k_objs; o; o = o->next) o->mark = 0;\n"
     "    k_gray_n = 0;\n"
     "    k_scan(&regs, (char *)&regs + sizeof regs);\n"
+    "#if KLANG_THREADS\n"
+    "    {\n"
+    "        KThread *self = K_SELF_GET();\n"
+    "        k_scan((void *)&regs, self ? self->bottom : k_stack_bottom);\n"
+    "        for (int i = 0; i < K_MAX_THREADS; i++) {\n"
+    "            KThread *t = &k_threads[i];\n"
+    "            if (!t->in_use || t == self || !t->parked) continue;\n"
+    "            k_scan(t->top, t->bottom);\n"
+    "            k_scan(t->regs, (char *)t->regs + sizeof t->regs);\n"
+    "        }\n"
+    "    }\n"
+    "#else\n"
     "    k_scan((void *)&regs, k_stack_bottom);\n"
+    "#endif\n"
     "    while (k_gray_n) {\n"
     "        KObj *o = k_gray[--k_gray_n];\n"
     "        void *pl = KPAY(o);\n"
@@ -3774,10 +4071,32 @@ static const char *GC_RUNTIME =
     "    k_collections++;\n"
     "}\n"
     "\n"
-    "void *klang_gc_alloc(size_t n) {\n"
-    "    if (k_live + n > k_limit) klang_gc_collect();\n"
+    "#if KLANG_THREADS\n"
+    "/* Bring every other thread to a stop, collect, let them go. */\n"
+    "void k_stop_the_world_and_collect(void) {\n"
+    "    k_stop = 1;\n"
+    "    while (k_nparked < k_nthreads - 1) K_WAIT(&k_cond_parked, &k_gc_mutex);\n"
+    "    k_collect_core();\n"
+    "    k_stop = 0;\n"
+    "    K_BROADCAST(&k_cond_resume);\n"
+    "}\n"
+    "void klang_gc_collect(void) {\n"
+    "    KThread *self = K_SELF_GET();\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    if (self) k_park_locked(self, &self);   /* someone else may be collecting */\n"
+    "    k_stop_the_world_and_collect();\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "}\n"
+    "#else\n"
+    "void klang_gc_collect(void) {\n"
+    "    if (!k_stack_bottom) return;   /* before main() set the anchor */\n"
+    "    k_collect_core();\n"
+    "}\n"
+    "#endif\n"
+    "\n"
+    "void *k_alloc_raw(size_t n) {\n"
     "    KObj *o = malloc(sizeof(KObj) + n);\n"
-    "    if (!o) { klang_gc_collect(); o = malloc(sizeof(KObj) + n); if (!o) k_oom(); }\n"
+    "    if (!o) k_oom();\n"
     "    o->size = n; o->mark = 0; o->next = k_objs; k_objs = o;\n"
     "    void *pl = KPAY(o);\n"
     "    if (!k_lo || (char *)pl < k_lo) k_lo = pl;\n"
@@ -3786,13 +4105,39 @@ static const char *GC_RUNTIME =
     "    k_live += n;\n"
     "    return pl;\n"
     "}\n"
+    "void *klang_gc_alloc(size_t n) {\n"
+    "#if KLANG_THREADS\n"
+    "    KThread *self = K_SELF_GET();\n"
+    "    K_LOCK(&k_gc_mutex);\n"
+    "    if (self) k_park_locked(self, &self);\n"
+    "    if (k_live + n > k_limit && self) k_stop_the_world_and_collect();\n"
+    "    void *pl = k_alloc_raw(n);\n"
+    "    K_UNLOCK(&k_gc_mutex);\n"
+    "    return pl;\n"
+    "#else\n"
+    "    if (k_live + n > k_limit) klang_gc_collect();\n"
+    "    return k_alloc_raw(n);\n"
+    "#endif\n"
+    "}\n"
     "void *klang_gc_grow(void *p, size_t n) {\n"
     "    void *q = klang_gc_alloc(n);\n"
     "    if (p) { size_t old = KHDR(p)->size; memcpy(q, p, old < n ? old : n); }\n"
     "    return q;\n"
     "}\n"
-    "void klang_gc_init(void *bottom) { k_stack_bottom = bottom; }\n"
+    "void klang_gc_init(void *bottom) {\n"
+    "    k_stack_bottom = bottom;\n"
+    "#if KLANG_THREADS\n"
+    "    K_MUTEX_INIT(&k_gc_mutex);\n"
+    "    K_COND_INIT(&k_cond_parked);\n"
+    "    K_COND_INIT(&k_cond_resume);\n"
+    "    K_SELF_INIT();\n"
+    "    klang_thread_register(bottom);\n"
+    "#endif\n"
+    "}\n"
     "int64_t klang_gc_heap(void) { return (int64_t)k_live; }\n"
+    "#if !KLANG_THREADS\n"
+    "void klang_safepoint(void) { }\n"
+    "#endif\n"
     "\n";
 
 static const char *RUNTIME =
@@ -3948,6 +4293,118 @@ static void emit_array(const Type *t, SB *sb) {
                    "        a->data = nd; a->cap = ncap;\n"
                    "    }\n"
                    "    a->data[a->len++] = v;\n}\n\n", m, m, e, e, e);
+}
+
+/* Deep-copies whatever crosses a thread boundary. Numbers and strings are
+   immutable, so they are shared as they are; arrays, maps, structs and enums are
+   rebuilt, which is what makes shared mutable state impossible rather than merely
+   discouraged. Emitted per type, so the copy is direct with no dispatch. */
+static void copy_expr(const Type *t, const char *val, SB *out) {
+    switch (t->kind) {
+        case TY_INT: case TY_FLOAT: case TY_BOOL: case TY_STRING:
+            sb_append(out, val);        /* immutable: sharing is safe */
+            return;
+        case TY_ARRAY: case TY_MAP: case TY_NAMED:
+            sb_appendf(out, "%s_copy(%s)", ty_mangle(t), val);
+            return;
+        default:
+            sb_append(out, val);
+            return;
+    }
+}
+
+static void emit_array_copy(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "%s %s_copy(%s a) {\n"
+                   "    %s c = %s_new(a->len);\n"
+                   "    for (int64_t i = 0; i < a->len; i++) c->data[i] = ", m, m, m, m, m);
+    copy_expr(ty_elem(t), "a->data[i]", sb);
+    sb_append(sb, ";\n    return c;\n}\n");
+}
+static void emit_map_copy(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    sb_appendf(sb, "%s %s_copy(%s d) {\n"
+                   "    %s c = %s_new();\n"
+                   "    for (int64_t i = 0; i < d->cap; i++) {\n"
+                   "        if (d->slots[i].state != 1) continue;\n"
+                   "        %s_put(c, ", m, m, m, m, m, m);
+    copy_expr(ty_key(t), "d->slots[i].key", sb);
+    sb_append(sb, ", ");
+    copy_expr(ty_val(t), "d->slots[i].val", sb);
+    sb_append(sb, ");\n    }\n    return c;\n}\n");
+}
+static void emit_struct_copy(StructDecl *sd, SB *sb) {
+    sb_appendf(sb, "%s %s_copy(%s v) {\n    %s c;\n", sd->mangled, sd->mangled, sd->mangled, sd->mangled);
+    if (sd->fields.count == 0) sb_append(sb, "    c._empty = v._empty;\n");
+    for (int i = 0; i < sd->fields.count; i++) {
+        Field *f = vec_get(&sd->fields, i);
+        char field[128];
+        snprintf(field, sizeof field, "v.%s", f->name);
+        sb_appendf(sb, "    c.%s = ", f->name);
+        copy_expr(f->type, field, sb);
+        sb_append(sb, ";\n");
+    }
+    sb_append(sb, "    return c;\n}\n");
+}
+static void emit_enum_copy(EnumDecl *ed, SB *sb) {
+    sb_appendf(sb, "%s %s_copy(%s v) {\n    %s c = v;\n", ed->mangled, ed->mangled, ed->mangled, ed->mangled);
+    for (int i = 0; i < ed->variants.count; i++) {
+        Variant *var = vec_get(&ed->variants, i);
+        if (var->payload.count == 0) continue;
+        sb_appendf(sb, "    if (v.tag == %s_TAG_%s) {\n", ed->mangled, var->name);
+        for (int j = 0; j < var->payload.count; j++) {
+            char field[160];
+            snprintf(field, sizeof field, "v.data.%s._%d", var->name, j);
+            sb_appendf(sb, "        c.data.%s._%d = ", var->name, j);
+            copy_expr(VEC_PTR(&var->payload, j, Type), field, sb);
+            sb_append(sb, ";\n");
+        }
+        sb_append(sb, "    }\n");
+    }
+    sb_append(sb, "    return c;\n}\n");
+}
+
+/* One task type per result type: the thread, its result, and a join that hands
+   ownership of the result to whoever awaited it. */
+static void emit_task(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    const char *r = c_type(ty_elem(t));
+    sb_appendf(sb, "typedef struct %s_s {\n"
+                   "    k_thread_t th;\n"
+                   "    %s (*fn)(void *);\n"
+                   "    void *env;\n"
+                   "    %s result;\n"
+                   "    int joined;\n"
+                   "} *%s;\n", m, r, r, m);
+    sb_appendf(sb, "k_ret_t K_THREAD_CALL %s_run(void *arg) {\n"
+                   "    %s t = arg;\n"
+                   "    int anchor = 0;\n"
+                   "    KThread *self = klang_thread_register(&anchor);\n"
+                   "    t->result = t->fn(t->env);\n"
+                   "    klang_thread_unregister(self);\n"
+                   "    return 0;\n"
+                   "}\n", m, m);
+    sb_appendf(sb, "%s %s_spawn(%s (*fn)(void *), void *env) {\n"
+                   "    %s t = klang_gc_alloc(sizeof(struct %s_s));\n"
+                   "    t->fn = fn; t->env = env; t->joined = 0;\n"
+                   "    memset(&t->result, 0, sizeof t->result);\n"
+                   "    if (!k_thread_start(&t->th, %s_run, t)) {\n"
+                   "        fprintf(stderr, \"klang: cannot start a thread\\n\");\n"
+                   "        exit(1);\n"
+                   "    }\n"
+                   "    return t;\n"
+                   "}\n", m, m, r, m, m, m);
+    /* Joining blocks, so the thread parks first — otherwise a collection started
+       by another thread would wait forever on one sitting in pthread_join. */
+    sb_appendf(sb, "%s %s_await(%s t) {\n"
+                   "    if (!t->joined) {\n"
+                   "        klang_gc_block_enter();\n"
+                   "        k_thread_join(t->th);\n"
+                   "        klang_gc_block_exit();\n"
+                   "        t->joined = 1;\n"
+                   "    }\n"
+                   "    return t->result;\n"
+                   "}\n\n", r, m, m);
 }
 
 /* A closure is a code pointer plus an environment pointer, passed by value. The
@@ -4261,7 +4718,7 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.10 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.11 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -4274,11 +4731,49 @@ static void codegen(SB *sb) {
         else sb_appendf(sb, "#include \"%s\"\n", h);
     }
     sb_append(sb, "\n");
+    sb_appendf(sb, "#define KLANG_THREADS %d\n\n", g_uses_threads ? 1 : 0);
+    if (g_uses_threads) sb_append(sb, THREAD_RUNTIME);
     sb_append(sb, GC_RUNTIME);
+    if (g_uses_threads) sb_append(sb, GC_THREADS);
+    sb_append(sb, GC_COLLECT);
     sb_append(sb, RUNTIME);
     sb_append(sb, "\n");
 
     emit_types(sb);
+
+    /* Copy functions and task types, once every type they mention exists. */
+    if (g_uses_threads) {
+        for (int i = 0; i < g_mono_arrays.count; i++)
+            sb_appendf(sb, "%s %s_copy(%s a);\n", ty_mangle(VEC_PTR(&g_mono_arrays, i, Type)),
+                       ty_mangle(VEC_PTR(&g_mono_arrays, i, Type)),
+                       ty_mangle(VEC_PTR(&g_mono_arrays, i, Type)));
+        for (int i = 0; i < g_mono_maps.count; i++)
+            sb_appendf(sb, "%s %s_copy(%s d);\n", ty_mangle(VEC_PTR(&g_mono_maps, i, Type)),
+                       ty_mangle(VEC_PTR(&g_mono_maps, i, Type)),
+                       ty_mangle(VEC_PTR(&g_mono_maps, i, Type)));
+        for (int i = 0; i < g_mono_structs.count; i++) {
+            StructDecl *sd = VEC_PTR(&g_mono_structs, i, StructDecl);
+            if (!sd->is_opaque) sb_appendf(sb, "%s %s_copy(%s v);\n", sd->mangled, sd->mangled, sd->mangled);
+        }
+        for (int i = 0; i < g_mono_enums.count; i++) {
+            EnumDecl *ed = VEC_PTR(&g_mono_enums, i, EnumDecl);
+            sb_appendf(sb, "%s %s_copy(%s v);\n", ed->mangled, ed->mangled, ed->mangled);
+        }
+        sb_append(sb, "\n");
+        for (int i = 0; i < g_mono_arrays.count; i++)
+            emit_array_copy(VEC_PTR(&g_mono_arrays, i, Type), sb);
+        for (int i = 0; i < g_mono_maps.count; i++)
+            emit_map_copy(VEC_PTR(&g_mono_maps, i, Type), sb);
+        for (int i = 0; i < g_mono_structs.count; i++) {
+            StructDecl *sd = VEC_PTR(&g_mono_structs, i, StructDecl);
+            if (!sd->is_opaque) emit_struct_copy(sd, sb);
+        }
+        for (int i = 0; i < g_mono_enums.count; i++)
+            emit_enum_copy(VEC_PTR(&g_mono_enums, i, EnumDecl), sb);
+        sb_append(sb, "\n");
+        for (int i = 0; i < g_mono_tasks.count; i++)
+            emit_task(VEC_PTR(&g_mono_tasks, i, Type), sb);
+    }
 
     /* Closures are lifted before anything is written, so their environments and
        declarations precede every body that builds or calls one. */
@@ -4522,7 +5017,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.10)\n\n"
+        printf("klangc — Klang compiler (0.11)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -4530,7 +5025,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.10.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.11.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -4543,6 +5038,7 @@ int main(int argc, char **argv) {
     vec_init(&g_mono_arrays, sizeof(Type *));
     vec_init(&g_mono_maps, sizeof(Type *));
     vec_init(&g_mono_fntypes, sizeof(Type *));
+    vec_init(&g_mono_tasks, sizeof(Type *));
     vec_init(&g_lams, sizeof(LamFrame));
     vec_init(&g_fnrefs, sizeof(Expr *));
     vec_init(&g_fn_queue, sizeof(FnDecl *));
@@ -4569,10 +5065,11 @@ int main(int argc, char **argv) {
     fclose(f);
 
     printf("klangc: compiled '%s' -> '%s'\n", in_path, out_path);
-    if (g_c_links.count) {
+    if (g_c_links.count || g_uses_threads) {
         printf("klangc: link with");
         for (int i = 0; i < g_c_links.count; i++)
             printf(" -l%s", VEC_PTR(&g_c_links, i, char));
+        if (g_uses_threads) printf(" -lpthread");   /* this program spawns */
         printf("\n");
     }
     return 0;

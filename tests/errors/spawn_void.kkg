@@ -1,0 +1,5 @@
+fn shout() { println("hi") }
+fn main() {
+    let t = spawn shout()
+    await t
+}
