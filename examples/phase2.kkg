@@ -38,7 +38,7 @@ fn restock(mut items: [Item], name: string, qty: int) {
 }
 
 fn main() {
-    // Interpolation: no more `+ to_string(...)` noise.
+    // Interpolation: no more `+ toString(...)` noise.
     let name = "Klang"
     let version = 2
     println("${name} v${version} — arrays are here")

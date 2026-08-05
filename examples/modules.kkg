@@ -6,6 +6,7 @@
 
 import "std/math"
 import "std/list"
+import "std/string" as str
 import "std/math" as arithmetic   // the same module under a second name
 
 pub struct Reading {
@@ -52,7 +53,7 @@ fn main() {
         Some(w) => println("last word      = ${w}"),
         None    => println("last word      = (none)"),
     }
-    println("reversed       = ${list.join(list.reversed(words), ", ")}")
+    println("reversed       = ${str.join(list.reversed(words), ", ")}")
 
     // Result crosses too, and `?`-style handling still works with match.
     match list.at(nums, 99) {

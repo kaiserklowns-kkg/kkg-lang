@@ -28,10 +28,10 @@ fn main() {
         total = add(total, i)
         i = i + 1
     }
-    println("sum 0..4 = " + to_string(total))
+    println("sum 0..4 = " + toString(total))
 
     let p = Point { x: 3, y: 4 }
-    println("dist_sq = " + to_string(dist_sq(p)))
+    println("dist_sq = " + toString(dist_sq(p)))
 
     println(classify(total))
     println(classify(-5))
@@ -43,5 +43,5 @@ fn main() {
     println(greeting)
 
     let ok = true && !false
-    println(to_string(ok))
+    println(toString(ok))
 }

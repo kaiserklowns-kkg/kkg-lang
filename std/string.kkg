@@ -1,11 +1,11 @@
 // std/string — text handling.
 //
-// The compiler provides only four primitives: substr, byte_at, from_byte and
-// index_of. Everything below is ordinary Klang written on top of them, which is
+// The compiler provides only four primitives: substr, byteAt, fromByte and
+// indexOf. Everything below is ordinary Klang written on top of them, which is
 // the point: the standard library is not a privileged place.
 //
 // Offsets are byte offsets. ASCII is handled exactly; other UTF-8 passes through
-// unchanged as long as you slice on boundaries you found with index_of.
+// unchanged as long as you slice on boundaries you found with indexOf.
 
 pub fn isEmpty(s: string) -> bool {
     return len(s) == 0
@@ -26,7 +26,7 @@ pub fn endsWith(s: string, suffix: string) -> bool {
 }
 
 pub fn contains(s: string, needle: string) -> bool {
-    return index_of(s, needle) >= 0
+    return indexOf(s, needle) >= 0
 }
 
 pub fn charAt(s: string, i: int) -> string {
@@ -50,11 +50,11 @@ pub fn split(s: string, sep: string) -> [string] {
         return parts
     }
     let mut rest = s
-    let mut cut = index_of(rest, sep)
+    let mut cut = indexOf(rest, sep)
     while cut >= 0 {
         push(parts, substr(rest, 0, cut))
         rest = substr(rest, cut + len(sep), len(rest))
-        cut = index_of(rest, sep)
+        cut = indexOf(rest, sep)
     }
     push(parts, rest)
     return parts
@@ -84,7 +84,7 @@ fn isSpace(b: int) -> bool {
 
 pub fn trimStart(s: string) -> string {
     let mut i = 0
-    while i < len(s) && isSpace(byte_at(s, i)) {
+    while i < len(s) && isSpace(byteAt(s, i)) {
         i = i + 1
     }
     return substr(s, i, len(s))
@@ -92,7 +92,7 @@ pub fn trimStart(s: string) -> string {
 
 pub fn trimEnd(s: string) -> string {
     let mut n = len(s)
-    while n > 0 && isSpace(byte_at(s, n - 1)) {
+    while n > 0 && isSpace(byteAt(s, n - 1)) {
         n = n - 1
     }
     return substr(s, 0, n)
@@ -105,11 +105,11 @@ pub fn trim(s: string) -> string {
 pub fn toUpper(s: string) -> string {
     let mut out = ""
     for i in 0..len(s) {
-        let b = byte_at(s, i)
+        let b = byteAt(s, i)
         if b >= 97 && b <= 122 {
-            out = out + from_byte(b - 32)
+            out = out + fromByte(b - 32)
         } else {
-            out = out + from_byte(b)
+            out = out + fromByte(b)
         }
     }
     return out
@@ -118,11 +118,11 @@ pub fn toUpper(s: string) -> string {
 pub fn toLower(s: string) -> string {
     let mut out = ""
     for i in 0..len(s) {
-        let b = byte_at(s, i)
+        let b = byteAt(s, i)
         if b >= 65 && b <= 90 {
-            out = out + from_byte(b + 32)
+            out = out + fromByte(b + 32)
         } else {
-            out = out + from_byte(b)
+            out = out + fromByte(b)
         }
     }
     return out
@@ -145,7 +145,7 @@ pub fn parseInt(s: string) -> Result<int, string> {
     }
     let mut i = 0
     let mut negative = false
-    let first = byte_at(t, 0)
+    let first = byteAt(t, 0)
     if first == 45 || first == 43 {
         negative = first == 45
         i = 1
@@ -155,9 +155,9 @@ pub fn parseInt(s: string) -> Result<int, string> {
     }
     let mut value = 0
     while i < len(t) {
-        let b = byte_at(t, i)
+        let b = byteAt(t, i)
         if b < 48 || b > 57 {
-            return Err("'${s}' is not an int: unexpected '${from_byte(b)}'")
+            return Err("'${s}' is not an int: unexpected '${fromByte(b)}'")
         }
         value = value * 10 + (b - 48)
         i = i + 1

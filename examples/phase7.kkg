@@ -1,0 +1,97 @@
+/* Phase 7: the syntax, filled in and locked.
+   Block comments nest, /* like this */ so commenting out code is safe. */
+
+import "std/string" as str
+import "std/list"
+
+const MAX_SCORE: int = 100
+const APP = "klang"
+const BANNER = "── ${APP} ──"        // constants may use earlier constants
+const VOWELS = ["a", "e", "i", "o", "u"]
+
+enum Signal { Go, Skip, Halt }
+
+struct Player {
+    name: string,
+    score: int,
+}
+
+// Any function whose first parameter is a Player can be called as a method.
+fn grade(p: Player) -> string {
+    if p.score >= 90 { return "A" }
+    if p.score >= 75 { return "B" }
+    return "C"
+}
+
+fn withBonus(p: Player, bonus: int) -> Player {
+    return Player { name: p.name, score: p.score + bonus }
+}
+
+fn countVowels(word: string) -> int {
+    let mut n = 0
+    for i in 0..word.len() {
+        let ch = word.charAt(i).toLower()
+        if VOWELS.any(|v| v == ch) {
+            n += 1
+        }
+    }
+    return n
+}
+
+fn main() {
+    println(BANNER)
+
+    // ── break and continue ────────────────────────────────────────────
+    let mut firstBig = 0
+    for n in [3, 9, 14, 21, 30] {
+        if n % 2 == 1 { continue }
+        if n > 10 {
+            firstBig = n
+            break
+        }
+    }
+    println("first even over ten = ${firstBig}")
+
+    // break works from inside a match, too — it belongs to the loop, not the match
+    let mut scanned = 0
+    for sig in [Go, Go, Halt, Go] {
+        match sig {
+            Halt => { break }
+            Skip => { continue }
+            Go   => { scanned += 1 }
+        }
+    }
+    println("scanned before halt = ${scanned}")
+
+    // ── compound assignment ───────────────────────────────────────────
+    let mut total = 0
+    for n in 1..5 { total += n }
+    total *= 2
+    total -= 4
+    println("total = ${total} (max ${MAX_SCORE})")
+
+    let mut tally = {"a": 1}
+    tally["a"] += 41
+    println("tally = ${tally["a"]}")
+
+    // ── method syntax: x.f(a) is exactly f(x, a) ──────────────────────
+    let p = Player { name: "ada", score: 88 }
+    println("${p.name} grades ${p.grade()}, with bonus ${p.withBonus(10).grade()}")
+
+    // Chaining reads in the order the work happens.
+    let names = "  Grace, Alan , Ada  "
+        .trim()
+        .split(",")
+        .map(|s| s.trim())
+        .sorted(|a, b| a < b)
+    println("names = ${names.join(" | ")}")
+
+    // The free-function form is the same call, and still works.
+    println("same  = ${str.join(list.sorted(names, |a, b| b < a), " | ")}")
+
+    println("vowels in 'Klang Language' = ${"Klang Language".countVowels()}")
+
+    assert(total == 16, "compound assignment must fold left to right")
+    assert(p.grade() == "B", "method call must reach a free function")
+    println("phase7: ok")
+}

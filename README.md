@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.7 — Phase 6 complete
+## Status: v0.8 — Phase 7 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -28,13 +28,13 @@ aspirational.
 - **Arrays `[T]`** — literals, indexing, nesting, generics over them, and bounds
   checks that report the index and the length instead of reading garbage.
 - **`for x in xs` and `for i in a..b`**, plus `len` and `push`.
-- **String interpolation** — `"${name} v${version}"`, no `to_string` needed.
+- **String interpolation** — `"${name} v${version}"`, no `toString` needed.
 - **`mut` parameters**, so a function can say it modifies what it was handed.
 - **Our own garbage collector** — conservative mark-sweep over the machine stack and
   registers, written for Klang rather than borrowed. A benchmark that peaked at
   **126 MB** while leaking now peaks at **18 MB**. See
   [The collector](docs/LANGUAGE_SPEC.md#the-collector) for the design and its tradeoffs.
-- **`assert(cond, msg)`**, plus `gc_collect()` and `gc_heap()` to inspect the heap.
+- **`assert(cond, msg)`**, plus `gcCollect()` and `gcHeap()` to inspect the heap.
 - **Modules** — `import "std/math"`, with `pub` marking what crosses the boundary and
   everything else private by default. Import paths resolve from the project root, so a
   path always names one module; cycles are reported, not followed.
@@ -124,7 +124,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase2.kkg](examples/phase2.kkg),
 [examples/modules.kkg](examples/modules.kkg),
 [examples/phase5.kkg](examples/phase5.kkg),
-[examples/phase6.kkg](examples/phase6.kkg), and
+[examples/phase6.kkg](examples/phase6.kkg),
+[examples/phase7.kkg](examples/phase7.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

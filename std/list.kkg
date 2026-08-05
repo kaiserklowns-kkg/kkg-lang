@@ -161,13 +161,4 @@ pub fn sorted<T>(xs: [T], less: fn(T, T) -> bool) -> [T] {
     return out
 }
 
-pub fn join(parts: [string], sep: string) -> string {
-    let mut out = ""
-    for i in 0..len(parts) {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + parts[i]
-    }
-    return out
-}
+// Joining strings lives in std/string, so `parts.join(", ")` is unambiguous.

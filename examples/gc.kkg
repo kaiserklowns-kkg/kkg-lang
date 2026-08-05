@@ -37,7 +37,7 @@ fn main() {
     }
     assert(churn > 0, "churn loop did not run")
 
-    gc_collect()
+    gcCollect()
 
     // Everything above must have survived, byte for byte.
     for i in 0..len(keep) {
@@ -51,8 +51,8 @@ fn main() {
 
     // The garbage really is gone: the live set is a few hundred KB, not the
     // tens of MB the churn loop allocated in total.
-    gc_collect()
-    let live = gc_heap()
+    gcCollect()
+    let live = gcHeap()
     println("live set after ${len(keep)} nodes + 120k allocations: ${live} bytes")
     assert(live < 1000000, "heap did not shrink — garbage was retained")
 

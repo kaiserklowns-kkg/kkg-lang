@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.7)
+# Klang Language Spec (v0.8)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -6,6 +6,13 @@
 > Anything not listed under "Implemented today" below does not exist in the compiler yet.
 
 ## Design decisions (locked in)
+
+- **Everything is `camelCase`** — builtins, standard library, your own code. One rule,
+  no guessing which side of the fence a name is on. This was settled before anyone
+  depended on the names, because renaming later breaks every line already written.
+- **`x.f(a)` means exactly `f(x, a)`.** Method syntax is a way of writing a call, not a
+  separate kind of declaration, so every function is usable both ways and the standard
+  library needed no rewriting to gain it.
 
 - **Memory model: garbage collected.** No borrow checker, no lifetimes, no `move`/`&`/`&mut`.
   This is the single biggest simplification vs. Rust and the main reason Klang aims to be as
@@ -167,9 +174,9 @@ the standard library should not be a privileged place with powers ordinary code 
 
 ```kkg
 substr(s, start, end)   // byte offsets, clamped — never reads out of range
-byte_at(s, i)           // bounds-checked byte value
-from_byte(code)         // one-byte string
-index_of(s, needle)     // byte offset, or -1
+byteAt(s, i)           // bounds-checked byte value
+fromByte(code)         // one-byte string
+indexOf(s, needle)     // byte offset, or -1
 ```
 
 Built on those, `std/string` provides `split`, `join`, `replace`, `trim`, `toUpper`,
@@ -178,7 +185,7 @@ Built on those, `std/string` provides `split`, `join`, `replace`, `trim`, `toUpp
 is a value you handle rather than a crash.
 
 Offsets are byte offsets. ASCII is exact; other UTF-8 passes through unchanged as long
-as you slice at boundaries found with `index_of`.
+as you slice at boundaries found with `indexOf`.
 
 ### Loops
 
@@ -194,7 +201,7 @@ for i in 0..len(nums) { println("${i}: ${nums[i]}") }
 ### String interpolation
 
 `${...}` takes any expression. Values are converted for you, so the common case needs no
-`to_string` call. Write `\${` for a literal dollar-brace.
+`toString` call. Write `\${` for a literal dollar-brace.
 
 ```kkg
 println("${name} v${version} — ${2 + 2} items")
@@ -211,6 +218,64 @@ fn restock(mut items: [Item], name: string) {
     push(items, Item { name: name, qty: 1 })   // the caller sees this
 }
 ```
+
+### Method calls
+
+`x.f(a)` is `f(x, a)`. There is no separate method declaration: any function whose
+first parameter accepts the receiver can be called this way, including builtins and
+anything in an imported module.
+
+```kkg
+fn grade(p: Player) -> string { ... }
+
+p.grade()                       // same call as grade(p)
+p.withBonus(10).grade()         // chains read in the order work happens
+
+"  a, b ".trim().split(",").map(|s| s.trim()).sorted(|a, b| a < b)
+xs.len()   m.has(k)   text.toUpper()
+```
+
+Resolution is deterministic: the current module, then the prelude, then each imported
+module — taking only `pub` functions from elsewhere. Exactly one candidate must accept
+the receiver as its first argument; if two do, the compiler names both and asks you to
+call one directly. A struct field holding a closure takes precedence over a free
+function of the same name, since it really is a member.
+
+### Constants
+
+```kkg
+const MAX: int = 100
+const APP = "klang"
+const BANNER = "── ${APP} ──"        // may use constants written above it
+const VOWELS = ["a", "e", "i", "o", "u"]
+```
+
+`const` is module-level and follows the same `pub` rule as everything else. An
+initializer is an ordinary expression evaluated once at startup, so it may allocate.
+Constants are set up in the order they are written, and using one before it is defined
+is an error rather than a silent zero.
+
+### Loops, breaking, and compound assignment
+
+```kkg
+for n in xs {
+    if n < 0 { continue }
+    if n > 100 { break }
+    total += n
+}
+```
+
+`break` and `continue` work in `while` and `for`, including from inside a `match` — the
+match does not swallow them. They refer to the nearest enclosing loop *in the same
+function*, so a loop outside a closure is not breakable from within it.
+
+`+=`, `-=`, `*=`, `/=` and `%=` expand to `x = x <op> v`. The target is evaluated
+twice, so keep calls out of the index of a compound assignment.
+
+### Comments
+
+`// to end of line`, and `/* ... */` which **nests**, so commenting out a region that
+already contains a block comment does what you meant.
 
 ### Closures
 
@@ -363,8 +428,8 @@ Details that matter:
 Two builtins make it observable, and `assert(cond, msg)` makes tests fail loudly:
 
 ```kkg
-gc_collect()            // force a collection
-let bytes = gc_heap()   // bytes currently held
+gcCollect()            // force a collection
+let bytes = gcHeap()   // bytes currently held
 ```
 
 [examples/gc.kkg](../examples/gc.kkg) is a regression test: it holds 500 nodes live
@@ -384,7 +449,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.7, Phase 6 complete)
+## Implemented today (v0.8, Phase 7 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -394,7 +459,7 @@ let received = ch.receive()
 - `struct` definitions, struct literals, field access
 - Arithmetic (`+ - * / %`), comparison (`== != < <= > >=`), logical (`&& || !`), unary `-`
 - String `+` concatenation and `==` / `!=` comparison
-- `return`; builtins `println`, `print`, `to_string`
+- `return`; builtins `println`, `print`, `toString`
 
 **Phase 1 additions**
 - `enum` with payload-carrying variants
@@ -417,6 +482,16 @@ let received = ch.receive()
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 7 additions — the syntax, filled in and settled**
+- **camelCase everywhere**: `toString`, `byteAt`, `fromByte`, `indexOf`, `gcCollect`,
+  `gcHeap` renamed so the compiler and the standard library agree
+- **Method calls**: `x.f(a)` is `f(x, a)`, with deterministic resolution and a clear
+  message when two modules both match
+- **`const`** at module level, `pub`-able, initializers may allocate
+- **`break` and `continue`**, correct from inside a `match`, scoped to the function
+- **Compound assignment** `+= -= *= /= %=`
+- **Nesting block comments** `/* ... */`
+
 **Phase 6 additions**
 - **Closures**: `fn(A) -> R` types and `|a, b| ...` literals, block or expression bodied
 - Parameter types inferred from the surrounding context; result inferred from the body
@@ -435,7 +510,7 @@ let received = ch.receive()
 - `get(m, k)` returns `Option<V>`; reading a missing key aborts, as an array index does
 - Map keys restricted to `int`, `string`, `bool`, rejected at compile time otherwise
 - Open-addressed hash map emitted per (key, value) pair — no boxing, no function pointers
-- **String primitives**: `substr`, `byte_at`, `from_byte`, `index_of`
+- **String primitives**: `substr`, `byteAt`, `fromByte`, `indexOf`
 - **`std/string`** — split, join, replace, trim, case, pad, reverse, `parseInt` returning
   `Result` — all written in Klang, not built into the compiler
 
@@ -451,7 +526,7 @@ let received = ch.receive()
 - **Klang's own garbage collector** — conservative mark-sweep over the machine stack
   and registers, with an adaptive collection threshold. Memory is now bounded: the
   benchmark that peaked at 126 MB before the GC now peaks at 18 MB.
-- `gc_collect()` and `gc_heap()` to force a collection and read live bytes
+- `gcCollect()` and `gcHeap()` to force a collection and read live bytes
 - `assert(cond, msg)` — aborts with a message and a non-zero exit status
 
 Generated C compiles clean under `-Wall -Wextra`.
@@ -462,7 +537,7 @@ Generated C compiles clean under `-Wall -Wextra`.
 - Integer overflow still wraps silently rather than trapping
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)
-- `to_string` / `==` on structs and enums (match on them instead)
+- `toString` / `==` on structs and enums (match on them instead)
 - Thread/channel send-ownership checking, `spawn`/`await`
 - Any backend other than C (LLVM, WASM are not planned near-term — C gets us "every platform"
   for free via the host's C toolchain)

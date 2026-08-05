@@ -1,0 +1,2 @@
+const N: int = "not an int"
+fn main() { println("${N}") }

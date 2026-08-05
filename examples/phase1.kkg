@@ -35,7 +35,7 @@ fn parse_port(text: string) -> Result<int, string> {
 
 fn describe_port(text: string) -> Result<string, string> {
     let port = parse_port(text)?
-    return Ok("port is " + to_string(port))
+    return Ok("port is " + toString(port))
 }
 
 // Generics get monomorphized — one real function per concrete type.
@@ -52,16 +52,16 @@ struct Pair<A, B> {
 }
 
 fn main() {
-    println(to_string(area(Circle(2.0))))
-    println(to_string(area(Rect(3.0, 4.0))))
-    println(to_string(area(Empty)))
+    println(toString(area(Circle(2.0))))
+    println(toString(area(Rect(3.0, 4.0))))
+    println(toString(area(Empty)))
 
     match safe_div(10, 2) {
-        Some(v) => println("10/2 = " + to_string(v)),
+        Some(v) => println("10/2 = " + toString(v)),
         None    => println("cannot divide"),
     }
     match safe_div(1, 0) {
-        Some(v) => println("1/0 = " + to_string(v)),
+        Some(v) => println("1/0 = " + toString(v)),
         None    => println("cannot divide by zero"),
     }
 
@@ -75,17 +75,17 @@ fn main() {
     }
 
     // Same generic function, two different instantiations.
-    println(to_string(first_or(Some(7), 0)))
+    println(toString(first_or(Some(7), 0)))
     println(first_or(None, "default"))
 
     let p = Pair { left: 1, right: "one" }
-    println(to_string(p.left) + " -> " + p.right)
+    println(toString(p.left) + " -> " + p.right)
 
     // match as a statement, with block arms.
     let mut label = ""
     match safe_div(9, 3) {
         Some(v) => {
-            label = "got " + to_string(v)
+            label = "got " + toString(v)
         }
         None => {
             label = "nothing"

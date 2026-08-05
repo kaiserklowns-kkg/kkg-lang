@@ -26,7 +26,7 @@ fn main() {
 
     // map / filter / reduce, generic over both the element and the result.
     let doubled = list.map(nums, |n| n * 2)
-    println("doubled  = ${list.join(list.map(doubled, |n| "${n}"), ", ")}")
+    println("doubled  = ${str.join(list.map(doubled, |n| "${n}"), ", ")}")
 
     let odds = list.filter(nums, |n| n % 2 == 1)
     println("odds     = ${len(odds)} of ${len(nums)}")
@@ -36,11 +36,11 @@ fn main() {
 
     // The result type can differ from the element type.
     let names = list.map(nums, |n| "n${n}")
-    println("names    = ${list.join(names, " ")}")
+    println("names    = ${str.join(names, " ")}")
 
     // A plain function can be passed where a closure is expected.
     let viaFn = list.map([1, 2, 3], double)
-    println("via fn   = ${list.join(list.map(viaFn, |n| "${n}"), ",")}")
+    println("via fn   = ${str.join(list.map(viaFn, |n| "${n}"), ",")}")
 
     // Predicates.
     println("any > 8  = ${list.any(nums, |n| n > 8)}")
@@ -59,10 +59,10 @@ fn main() {
         Person { name: "alan", age: 41 },
     ]
     let byAge = list.sorted(people, |a, b| a.age < b.age)
-    println("by age   = ${list.join(list.map(byAge, |p| "${p.name}(${p.age})"), " ")}")
+    println("by age   = ${str.join(list.map(byAge, |p| "${p.name}(${p.age})"), " ")}")
 
     let byName = list.sorted(people, |a, b| a.name < b.name)
-    println("by name  = ${list.join(list.map(byName, |p| p.name), " ")}")
+    println("by name  = ${str.join(list.map(byName, |p| p.name), " ")}")
 
     // Capturing the surrounding scope.
     let threshold = 4
@@ -70,7 +70,7 @@ fn main() {
     println("> ${threshold}      = ${len(big)} items")
 
     let prefix = "item-"
-    println("prefixed = ${list.join(list.map([1, 2], |n| prefix + "${n}"), " ")}")
+    println("prefixed = ${str.join(list.map([1, 2], |n| prefix + "${n}"), " ")}")
 
     // A closure that outlives the function that built it.
     let next = makeCounter(10)
@@ -95,7 +95,7 @@ fn main() {
     let words = str.split("the quick brown fox jumps", " ")
     let longWords = list.filter(words, |w| len(w) > 3)
     let upper = list.map(longWords, |w| str.toUpper(w))
-    println("long     = ${list.join(upper, " ")}")
+    println("long     = ${str.join(upper, " ")}")
 
     assert(total == 28, "reduce must sum correctly")
     assert(len(odds) == 4, "filter must keep the odd numbers")
