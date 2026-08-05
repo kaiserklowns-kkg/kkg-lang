@@ -1,0 +1,5 @@
+struct Point { x: int }
+fn main() {
+    let m: {Point: int} = {}
+    println("${len(m)}")
+}

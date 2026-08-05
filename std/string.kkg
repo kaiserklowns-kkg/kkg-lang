@@ -1,0 +1,185 @@
+// std/string — text handling.
+//
+// The compiler provides only four primitives: substr, byte_at, from_byte and
+// index_of. Everything below is ordinary Klang written on top of them, which is
+// the point: the standard library is not a privileged place.
+//
+// Offsets are byte offsets. ASCII is handled exactly; other UTF-8 passes through
+// unchanged as long as you slice on boundaries you found with index_of.
+
+pub fn isEmpty(s: string) -> bool {
+    return len(s) == 0
+}
+
+pub fn startsWith(s: string, prefix: string) -> bool {
+    if len(prefix) > len(s) {
+        return false
+    }
+    return substr(s, 0, len(prefix)) == prefix
+}
+
+pub fn endsWith(s: string, suffix: string) -> bool {
+    if len(suffix) > len(s) {
+        return false
+    }
+    return substr(s, len(s) - len(suffix), len(s)) == suffix
+}
+
+pub fn contains(s: string, needle: string) -> bool {
+    return index_of(s, needle) >= 0
+}
+
+pub fn charAt(s: string, i: int) -> string {
+    return substr(s, i, i + 1)
+}
+
+pub fn repeat(s: string, times: int) -> string {
+    let mut out = ""
+    for _i in 0..times {
+        out = out + s
+    }
+    return out
+}
+
+pub fn split(s: string, sep: string) -> [string] {
+    let mut parts: [string] = []
+    if len(sep) == 0 {
+        for i in 0..len(s) {
+            push(parts, charAt(s, i))
+        }
+        return parts
+    }
+    let mut rest = s
+    let mut cut = index_of(rest, sep)
+    while cut >= 0 {
+        push(parts, substr(rest, 0, cut))
+        rest = substr(rest, cut + len(sep), len(rest))
+        cut = index_of(rest, sep)
+    }
+    push(parts, rest)
+    return parts
+}
+
+pub fn join(parts: [string], sep: string) -> string {
+    let mut out = ""
+    for i in 0..len(parts) {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + parts[i]
+    }
+    return out
+}
+
+pub fn replace(s: string, from: string, to: string) -> string {
+    if len(from) == 0 {
+        return s
+    }
+    return join(split(s, from), to)
+}
+
+fn isSpace(b: int) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+pub fn trimStart(s: string) -> string {
+    let mut i = 0
+    while i < len(s) && isSpace(byte_at(s, i)) {
+        i = i + 1
+    }
+    return substr(s, i, len(s))
+}
+
+pub fn trimEnd(s: string) -> string {
+    let mut n = len(s)
+    while n > 0 && isSpace(byte_at(s, n - 1)) {
+        n = n - 1
+    }
+    return substr(s, 0, n)
+}
+
+pub fn trim(s: string) -> string {
+    return trimEnd(trimStart(s))
+}
+
+pub fn toUpper(s: string) -> string {
+    let mut out = ""
+    for i in 0..len(s) {
+        let b = byte_at(s, i)
+        if b >= 97 && b <= 122 {
+            out = out + from_byte(b - 32)
+        } else {
+            out = out + from_byte(b)
+        }
+    }
+    return out
+}
+
+pub fn toLower(s: string) -> string {
+    let mut out = ""
+    for i in 0..len(s) {
+        let b = byte_at(s, i)
+        if b >= 65 && b <= 90 {
+            out = out + from_byte(b + 32)
+        } else {
+            out = out + from_byte(b)
+        }
+    }
+    return out
+}
+
+pub fn reverse(s: string) -> string {
+    let mut out = ""
+    let n = len(s)
+    for i in 0..n {
+        out = out + charAt(s, n - 1 - i)
+    }
+    return out
+}
+
+// Parsing returns Result, so a bad input is a value you must handle, not a crash.
+pub fn parseInt(s: string) -> Result<int, string> {
+    let t = trim(s)
+    if len(t) == 0 {
+        return Err("cannot parse an empty string as an int")
+    }
+    let mut i = 0
+    let mut negative = false
+    let first = byte_at(t, 0)
+    if first == 45 || first == 43 {
+        negative = first == 45
+        i = 1
+    }
+    if i >= len(t) {
+        return Err("'${s}' has a sign but no digits")
+    }
+    let mut value = 0
+    while i < len(t) {
+        let b = byte_at(t, i)
+        if b < 48 || b > 57 {
+            return Err("'${s}' is not an int: unexpected '${from_byte(b)}'")
+        }
+        value = value * 10 + (b - 48)
+        i = i + 1
+    }
+    if negative {
+        return Ok(0 - value)
+    }
+    return Ok(value)
+}
+
+pub fn padStart(s: string, width: int, fill: string) -> string {
+    let mut out = s
+    while len(out) < width {
+        out = fill + out
+    }
+    return out
+}
+
+pub fn padEnd(s: string, width: int, fill: string) -> string {
+    let mut out = s
+    while len(out) < width {
+        out = out + fill
+    }
+    return out
+}

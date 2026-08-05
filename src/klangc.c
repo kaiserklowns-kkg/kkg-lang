@@ -323,7 +323,7 @@ static char *key_mangle(const char *key) {
 }
 /* ───────────────────────── types ───────────────────────── */
 
-typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_VAR, TY_UNKNOWN } TyKind;
+typedef enum { TY_VOID, TY_INT, TY_FLOAT, TY_BOOL, TY_STRING, TY_NAMED, TY_ARRAY, TY_MAP, TY_VAR, TY_UNKNOWN } TyKind;
 
 typedef struct Type Type;
 struct Type {
@@ -349,10 +349,18 @@ static Type *ty_named(const char *name) { Type *t = ty_new(TY_NAMED); t->name = 
 static Type *ty_var(const char *name) { Type *t = ty_new(TY_VAR); t->name = strdup(name); return t; }
 static Type *ty_array(Type *elem) { Type *t = ty_new(TY_ARRAY); VEC_PUSH_PTR(&t->args, elem); return t; }
 static Type *ty_elem(const Type *t) { return VEC_PTR(&t->args, 0, Type); }
+static Type *ty_map(Type *k, Type *v) {
+    Type *t = ty_new(TY_MAP);
+    VEC_PUSH_PTR(&t->args, k); VEC_PUSH_PTR(&t->args, v);
+    return t;
+}
+static Type *ty_key(const Type *t) { return VEC_PTR(&t->args, 0, Type); }
+static Type *ty_val(const Type *t) { return VEC_PTR(&t->args, 1, Type); }
 
 static bool ty_eq(const Type *a, const Type *b) {
     if (a->kind != b->kind) return false;
     if (a->kind == TY_ARRAY) return ty_eq(ty_elem(a), ty_elem(b));
+    if (a->kind == TY_MAP) return ty_eq(ty_key(a), ty_key(b)) && ty_eq(ty_val(a), ty_val(b));
     if (a->kind == TY_NAMED || a->kind == TY_VAR) {
         if (strcmp(a->name, b->name) != 0) return false;
         if (a->args.count != b->args.count) return false;
@@ -380,6 +388,12 @@ static const char *ty_str(const Type *t) {
         case TY_STRING: return "string";
         case TY_UNKNOWN: return "<unknown>";
         case TY_ARRAY: snprintf(buf, 256, "[%s]", ty_str(ty_elem(t))); return buf;
+        case TY_MAP: {
+            char kb[100];
+            snprintf(kb, sizeof kb, "%s", ty_str(ty_key(t)));
+            snprintf(buf, 256, "{%s: %s}", kb, ty_str(ty_val(t)));
+            return buf;
+        }
         default: break;
     }
     const char *shown = t->kind == TY_NAMED ? key_show(t->name) : t->name;
@@ -402,6 +416,10 @@ static void ty_mangle_into(const Type *t, SB *sb) {
         case TY_STRING: sb_append(sb, "string"); return;
         case TY_VAR: sb_append(sb, t->name); return;
         case TY_ARRAY: sb_append(sb, "arr_"); ty_mangle_into(ty_elem(t), sb); return;
+        case TY_MAP:
+            sb_append(sb, "map_"); ty_mangle_into(ty_key(t), sb);
+            sb_append(sb, "_"); ty_mangle_into(ty_val(t), sb);
+            return;
         default: break;
     }
     {
@@ -421,7 +439,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX
+    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -631,6 +649,13 @@ static Type *parse_type(Parser *p) {
         p_expect(p, TK_RBRACKET);
         return ty_array(elem);
     }
+    if (p_match(p, TK_LBRACE)) {          /* {string: int} */
+        Type *k = parse_type(p);
+        p_expect(p, TK_COLON);
+        Type *v = parse_type(p);
+        p_expect(p, TK_RBRACE);
+        return ty_map(k, v);
+    }
     Token t = p_expect(p, TK_IDENT);
     if (strcmp(t.text, "int") == 0) return ty_int();
     if (strcmp(t.text, "float") == 0) return ty_float();
@@ -754,6 +779,20 @@ static Expr *parse_primary(Parser *p) {
         if (tok.parts) return parse_interp(p, &tok);
         Expr *e = new_expr(EX_STRING, line);
         e->sval = tok.text;
+        return e;
+    }
+    /* `{}` and `{k: v, ...}`. Not allowed where a block could start, so an `if`
+       or `for` header needs parentheses around a map literal. */
+    if (p_check(p, TK_LBRACE) && !p->no_struct_lit) {
+        Expr *e = new_expr(EX_MAP_LIT, line);
+        p_advance(p);
+        while (!p_check(p, TK_RBRACE)) {
+            VEC_PUSH_PTR(&e->args, parse_expr(p));   /* key */
+            p_expect(p, TK_COLON);
+            VEC_PUSH_PTR(&e->args, parse_expr(p));   /* value */
+            if (!p_match(p, TK_COMMA)) break;
+        }
+        p_expect(p, TK_RBRACE);
         return e;
     }
     if (p_check(p, TK_LBRACKET)) {
@@ -1200,6 +1239,10 @@ static Type *subst_type(Type *t, const Vec *subst) {
         Type *e = subst_type(ty_elem(t), subst);
         return e == ty_elem(t) ? t : ty_array(e);
     }
+    if (t->kind == TY_MAP) {
+        Type *k = subst_type(ty_key(t), subst), *v = subst_type(ty_val(t), subst);
+        return (k == ty_key(t) && v == ty_val(t)) ? t : ty_map(k, v);
+    }
     if (t->kind != TY_NAMED || t->args.count == 0) return t;
     Type *r = ty_named(t->name);
     for (int i = 0; i < t->args.count; i++)
@@ -1219,6 +1262,8 @@ static bool unify(Type *pat, Type *actual, Vec *subst) {
     }
     if (pat->kind != actual->kind) return false;
     if (pat->kind == TY_ARRAY) return unify(ty_elem(pat), ty_elem(actual), subst);
+    if (pat->kind == TY_MAP)
+        return unify(ty_key(pat), ty_key(actual), subst) && unify(ty_val(pat), ty_val(actual), subst);
     if (pat->kind == TY_NAMED) {
         if (strcmp(pat->name, actual->name) != 0) return false;
         if (pat->args.count != actual->args.count) return false;
@@ -1295,9 +1340,16 @@ static Vec g_mono_fns;      /* Vec<FnDecl*>     */
 static Vec g_mono_arrays;   /* Vec<Type*> — one entry per distinct element type */
 static Vec g_fn_queue;      /* Vec<FnDecl*> — pending typecheck */
 
+static Vec g_mono_maps;     /* Vec<Type*> — one entry per distinct (key, value) pair */
+
 static bool array_registered(const char *mangled) {
     for (int i = 0; i < g_mono_arrays.count; i++)
         if (strcmp(ty_mangle(VEC_PTR(&g_mono_arrays, i, Type)), mangled) == 0) return true;
+    return false;
+}
+static bool map_registered(const char *mangled) {
+    for (int i = 0; i < g_mono_maps.count; i++)
+        if (strcmp(ty_mangle(VEC_PTR(&g_mono_maps, i, Type)), mangled) == 0) return true;
     return false;
 }
 
@@ -1343,6 +1395,21 @@ static void request_type(Type *t, int line) {
         char *am = ty_mangle(t);
         if (!array_registered(am)) VEC_PUSH_PTR(&g_mono_arrays, t);
         free(am);
+        return;
+    }
+    if (t->kind == TY_MAP) {
+        TyKind kk = ty_key(t)->kind;
+        if (kk != TY_INT && kk != TY_STRING && kk != TY_BOOL)
+            fail(line, "a map key must be int, string or bool — %s cannot be hashed",
+                 ty_str(ty_key(t)));
+        request_type(ty_key(t), line);
+        request_type(ty_val(t), line);
+        /* keys(...) and values(...) hand back arrays, so those exist for every map */
+        request_type(ty_array(ty_key(t)), line);
+        request_type(ty_array(ty_val(t)), line);
+        char *mm = ty_mangle(t);
+        if (!map_registered(mm)) VEC_PUSH_PTR(&g_mono_maps, t);
+        free(mm);
         return;
     }
     if (t->kind != TY_NAMED) return;
@@ -1655,9 +1722,82 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
     if (strcmp(e->sval, "len") == 0) {
         if (e->args.count != 1) fail(e->line, "'len' takes exactly 1 argument");
         Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
-        if (at->kind != TY_ARRAY && at->kind != TY_STRING)
-            fail(e->line, "'len' needs an array or string, got %s", ty_str(at));
+        if (at->kind != TY_ARRAY && at->kind != TY_STRING && at->kind != TY_MAP)
+            fail(e->line, "'len' needs an array, string or map, got %s", ty_str(at));
         return ty_int();
+    }
+    /* The string kernel. Everything else — split, trim, case conversion, parsing —
+       is written in Klang on top of these, in std/string. */
+    if (strcmp(e->sval, "substr") == 0) {
+        if (e->args.count != 3)
+            fail(e->line, "'substr' takes 3 arguments: the string, start, and end");
+        Type *st = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_string());
+        if (st->kind != TY_STRING) fail(e->line, "'substr' needs a string, got %s", ty_str(st));
+        for (int i = 1; i < 3; i++) {
+            Type *it = tc_expr(VEC_PTR(&e->args, i, Expr), sc, ty_int());
+            if (it->kind != TY_INT) fail(e->line, "'substr' bounds must be int, got %s", ty_str(it));
+        }
+        return ty_string();
+    }
+    if (strcmp(e->sval, "byte_at") == 0) {
+        if (e->args.count != 2) fail(e->line, "'byte_at' takes 2 arguments: the string and an index");
+        Type *st = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_string());
+        if (st->kind != TY_STRING) fail(e->line, "'byte_at' needs a string, got %s", ty_str(st));
+        Type *it = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_int());
+        if (it->kind != TY_INT) fail(e->line, "'byte_at' index must be int, got %s", ty_str(it));
+        return ty_int();
+    }
+    if (strcmp(e->sval, "from_byte") == 0) {
+        if (e->args.count != 1) fail(e->line, "'from_byte' takes exactly 1 argument");
+        Type *it = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_int());
+        if (it->kind != TY_INT) fail(e->line, "'from_byte' needs an int, got %s", ty_str(it));
+        return ty_string();
+    }
+    if (strcmp(e->sval, "index_of") == 0) {
+        if (e->args.count != 2)
+            fail(e->line, "'index_of' takes 2 arguments: the string and what to look for");
+        for (int i = 0; i < 2; i++) {
+            Type *st = tc_expr(VEC_PTR(&e->args, i, Expr), sc, ty_string());
+            if (st->kind != TY_STRING) fail(e->line, "'index_of' needs strings, got %s", ty_str(st));
+        }
+        return ty_int();
+    }
+    if (strcmp(e->sval, "has") == 0 || strcmp(e->sval, "remove") == 0) {
+        bool removing = strcmp(e->sval, "remove") == 0;
+        if (e->args.count != 2)
+            fail(e->line, "'%s' takes 2 arguments: the map and the key", e->sval);
+        Expr *m = VEC_PTR(&e->args, 0, Expr);
+        Type *mt = tc_expr(m, sc, NULL);
+        if (mt->kind != TY_MAP) fail(e->line, "'%s' needs a map, got %s", e->sval, ty_str(mt));
+        if (removing) {
+            Var *root = lvalue_root(m, sc);
+            if (!root) fail(e->line, "'remove' needs a variable to remove from");
+            if (!root->is_mut)
+                fail(e->line, "cannot remove from '%s' because it is immutable "
+                              "(declare it 'let mut' to allow this)", root->name);
+        }
+        Type *kt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_key(mt));
+        if (!ty_eq(kt, ty_key(mt)))
+            fail(e->line, "this map is keyed by %s, got %s", ty_str(ty_key(mt)), ty_str(kt));
+        return removing ? ty_void() : ty_bool();
+    }
+    if (strcmp(e->sval, "keys") == 0 || strcmp(e->sval, "values") == 0) {
+        if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
+        Type *mt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        if (mt->kind != TY_MAP) fail(e->line, "'%s' needs a map, got %s", e->sval, ty_str(mt));
+        return ty_array(strcmp(e->sval, "keys") == 0 ? ty_key(mt) : ty_val(mt));
+    }
+    if (strcmp(e->sval, "get") == 0) {
+        if (e->args.count != 2)
+            fail(e->line, "'get' takes 2 arguments: the map and the key");
+        Type *mt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        if (mt->kind != TY_MAP) fail(e->line, "'get' needs a map, got %s", ty_str(mt));
+        Type *kt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_key(mt));
+        if (!ty_eq(kt, ty_key(mt)))
+            fail(e->line, "this map is keyed by %s, got %s", ty_str(ty_key(mt)), ty_str(kt));
+        Type *opt = ty_named(PRELUDE_OPTION);
+        VEC_PUSH_PTR(&opt->args, ty_val(mt));
+        return opt;
     }
     if (strcmp(e->sval, "push") == 0) {
         if (e->args.count != 2) fail(e->line, "'push' takes exactly 2 arguments: the array and the value");
@@ -1918,16 +2058,52 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
         }
         case EX_INDEX: {
             Type *base = tc_expr(e->lhs, sc, NULL);
+            if (base->kind == TY_MAP) {
+                Type *kt = tc_expr(e->rhs, sc, ty_key(base));
+                if (!ty_eq(kt, ty_key(base)))
+                    fail(e->rhs->line, "this map is keyed by %s, got %s",
+                         ty_str(ty_key(base)), ty_str(kt));
+                t = ty_val(base);
+                break;
+            }
             if (base->kind != TY_ARRAY)
-                fail(e->line, "cannot index %s — only arrays support '[...]'", ty_str(base));
+                fail(e->line, "cannot index %s — only arrays and maps support '[...]'", ty_str(base));
             Type *ix = tc_expr(e->rhs, sc, ty_int());
             if (ix->kind != TY_INT) fail(e->rhs->line, "an array index must be int, got %s", ty_str(ix));
             t = ty_elem(base);
             break;
         }
+        case EX_MAP_LIT: {
+            Type *wk = expected && expected->kind == TY_MAP ? ty_key(expected) : NULL;
+            Type *wv = expected && expected->kind == TY_MAP ? ty_val(expected) : NULL;
+            if (e->args.count == 0) {
+                if (!wk)
+                    fail(e->line, "cannot tell what this empty map holds — "
+                                  "annotate it, as in 'let m: {string: int} = {}'");
+                t = ty_map(wk, wv);
+                break;
+            }
+            Type *kt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, wk);
+            Type *vt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, wv);
+            if (vt->kind == TY_VOID) fail(e->line, "a map cannot hold void values");
+            for (int i = 2; i < e->args.count; i += 2) {
+                Expr *k = VEC_PTR(&e->args, i, Expr);
+                Expr *v = VEC_PTR(&e->args, i + 1, Expr);
+                Type *at = tc_expr(k, sc, kt);
+                if (!ty_eq(at, kt))
+                    fail(k->line, "map key %d is %s but the first is %s — "
+                                  "every key must have the same type", i / 2 + 1, ty_str(at), ty_str(kt));
+                Type *bt = tc_expr(v, sc, vt);
+                if (!ty_eq(bt, vt))
+                    fail(v->line, "map value %d is %s but the first is %s — "
+                                  "every value must have the same type", i / 2 + 1, ty_str(bt), ty_str(vt));
+            }
+            t = ty_map(kt, vt);
+            break;
+        }
         default: t = ty_unknown(); break;
     }
-    if (t->kind == TY_NAMED || t->kind == TY_ARRAY) request_type(t, e->line);
+    if (t->kind == TY_NAMED || t->kind == TY_ARRAY || t->kind == TY_MAP) request_type(t, e->line);
     e->type = t;
     return t;
 }
@@ -2100,7 +2276,7 @@ static const char *c_type(const Type *t) {
         case TY_FLOAT: return "double";
         case TY_BOOL: return "bool";
         case TY_STRING: return "char*";
-        case TY_NAMED: case TY_ARRAY: return ty_mangle(t);
+        case TY_NAMED: case TY_ARRAY: case TY_MAP: return ty_mangle(t);
         default: return "void*";
     }
 }
@@ -2309,6 +2485,22 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             sb_append(out, "))");
             break;
         }
+        case EX_MAP_LIT: {
+            char *m = ty_mangle(e->type);
+            char *tmp = fresh_tmp();
+            indent_to(pre, ind);
+            sb_appendf(pre, "%s %s = %s_new();\n", m, tmp, m);
+            for (int i = 0; i < e->args.count; i += 2) {
+                SB kv; sb_init(&kv);
+                SB vv; sb_init(&vv);
+                cg_expr(VEC_PTR(&e->args, i, Expr), &kv, pre, ind);
+                cg_expr(VEC_PTR(&e->args, i + 1, Expr), &vv, pre, ind);
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s_put(%s, %s, %s);\n", m, tmp, kv.data, vv.data);
+            }
+            sb_append(out, tmp);
+            break;
+        }
         case EX_TRY: cg_try(e, out, pre, ind); break;
         case EX_CALL: {
             if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
@@ -2350,6 +2542,54 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                     cg_expr(arg, out, pre, ind);
                     sb_append(out, ")->len");
                 }
+                break;
+            }
+            if (strcmp(e->sval, "substr") == 0 || strcmp(e->sval, "byte_at") == 0 ||
+                strcmp(e->sval, "from_byte") == 0 || strcmp(e->sval, "index_of") == 0) {
+                sb_appendf(out, "klang_%s(", e->sval);
+                for (int i = 0; i < e->args.count; i++) {
+                    if (i) sb_append(out, ", ");
+                    cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
+                }
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "has") == 0 || strcmp(e->sval, "remove") == 0 ||
+                strcmp(e->sval, "keys") == 0 || strcmp(e->sval, "values") == 0) {
+                Expr *m = VEC_PTR(&e->args, 0, Expr);
+                sb_appendf(out, "%s_%s(", ty_mangle(m->type), e->sval);
+                cg_expr(m, out, pre, ind);
+                if (e->args.count > 1) {
+                    sb_append(out, ", ");
+                    cg_expr(VEC_PTR(&e->args, 1, Expr), out, pre, ind);
+                }
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "get") == 0) {
+                /* Some(v) when present, None otherwise — evaluated into a temp so the
+                   map and key are each read once. */
+                Expr *m = VEC_PTR(&e->args, 0, Expr);
+                Expr *k = VEC_PTR(&e->args, 1, Expr);
+                char *mm = ty_mangle(m->type);
+                char *mv = fresh_tmp(), *kv = fresh_tmp(), *rv = fresh_tmp();
+                SB mb; sb_init(&mb);
+                SB kb; sb_init(&kb);
+                cg_expr(m, &mb, pre, ind);
+                cg_expr(k, &kb, pre, ind);
+                char *om = ty_mangle(e->type);
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s %s = %s;\n", c_type(m->type), mv, mb.data);
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s %s = %s;\n", c_type(ty_key(m->type)), kv, kb.data);
+                indent_to(pre, ind);
+                sb_appendf(pre, "%s %s = %s_has(%s, %s)\n", om, rv, mm, mv, kv);
+                indent_to(pre, ind);
+                sb_appendf(pre, "    ? (%s){ .tag = %s_TAG_Some, .data.Some._0 = *%s_at(%s, %s) }\n",
+                           om, om, mm, mv, kv);
+                indent_to(pre, ind);
+                sb_appendf(pre, "    : (%s){ .tag = %s_TAG_None };\n", om, om);
+                sb_append(out, rv);
                 break;
             }
             if (strcmp(e->sval, "push") == 0) {
@@ -2399,6 +2639,20 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             sb_appendf(sb, "%s %s = %s;\n", c_type(s->decl_type), s->name, line.data);
             break;
         case ST_ASSIGN: {
+            /* `m[k] = v` on a map inserts, so it cannot go through the read path
+               (which aborts on a missing key). */
+            if (s->target->kind == EX_INDEX && s->target->lhs->type->kind == TY_MAP) {
+                SB base; sb_init(&base);
+                SB key; sb_init(&key);
+                cg_expr(s->target->lhs, &base, &pre, ind);
+                cg_expr(s->target->rhs, &key, &pre, ind);
+                cg_expr(s->expr, &line, &pre, ind);
+                flush(sb, &pre);
+                indent_to(sb, ind);
+                sb_appendf(sb, "%s_put(%s, %s, %s);\n",
+                           ty_mangle(s->target->lhs->type), base.data, key.data, line.data);
+                break;
+            }
             SB tgt; sb_init(&tgt);
             cg_expr(s->target, &tgt, &pre, ind);
             cg_expr(s->expr, &line, &pre, ind);
@@ -2696,6 +2950,48 @@ static const char *RUNTIME =
     "void klang_assert(bool ok, const char *msg) {\n"
     "    if (!ok) { fprintf(stderr, \"klang: assertion failed: %s\\n\", msg); exit(1); }\n"
     "}\n"
+    "uint64_t klang_hash_int(int64_t v) {\n"
+    "    uint64_t x = (uint64_t)v;\n"
+    "    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;\n"
+    "    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;\n"
+    "    return x ^ (x >> 33);\n"
+    "}\n"
+    "uint64_t klang_hash_str(const char *s) {\n"
+    "    uint64_t h = 1469598103934665603ULL;\n"
+    "    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }\n"
+    "    return h;\n"
+    "}\n"
+    "void klang_bounds(int64_t i, int64_t len);\n"
+    "/* Byte offsets, clamped rather than trusted, so slicing never reads out of range. */\n"
+    "char *klang_substr(const char *s, int64_t start, int64_t end) {\n"
+    "    int64_t n = (int64_t)strlen(s);\n"
+    "    if (start < 0) start = 0;\n"
+    "    if (end > n) end = n;\n"
+    "    if (start >= end) return klang_strdup(\"\");\n"
+    "    size_t len = (size_t)(end - start);\n"
+    "    char *r = klang_gc_alloc(len + 1);\n"
+    "    memcpy(r, s + start, len); r[len] = 0;\n"
+    "    return r;\n"
+    "}\n"
+    "int64_t klang_byte_at(const char *s, int64_t i) {\n"
+    "    int64_t n = (int64_t)strlen(s);\n"
+    "    if (i < 0 || i >= n) klang_bounds(i, n);\n"
+    "    return (int64_t)(unsigned char)s[i];\n"
+    "}\n"
+    "char *klang_from_byte(int64_t code) {\n"
+    "    char *r = klang_gc_alloc(2);\n"
+    "    r[0] = (char)(code & 0xff); r[1] = 0;\n"
+    "    return r;\n"
+    "}\n"
+    "int64_t klang_index_of(const char *s, const char *needle) {\n"
+    "    if (!*needle) return 0;\n"
+    "    const char *hit = strstr(s, needle);\n"
+    "    return hit ? (int64_t)(hit - s) : -1;\n"
+    "}\n"
+    "void klang_no_key(void) {\n"
+    "    fprintf(stderr, \"klang: no such key in map\\n\");\n"
+    "    exit(1);\n"
+    "}\n"
     "void klang_bounds(int64_t i, int64_t len) {\n"
     "    fprintf(stderr, \"klang: index %\" PRId64 \" is out of bounds for an array of length %\" PRId64 \"\\n\", i, len);\n"
     "    exit(1);\n"
@@ -2726,9 +3022,82 @@ static void emit_array(const Type *t, SB *sb) {
                    "    a->data[a->len++] = v;\n}\n\n", m, m, e, e, e);
 }
 
+/* Open-addressed hash map with linear probing and tombstones. One is emitted per
+   distinct (key, value) pair, so lookups compare and hash concrete types with no
+   indirection through function pointers. */
+static void emit_map(const Type *t, SB *sb) {
+    char *m = ty_mangle(t);
+    const Type *kt = ty_key(t);
+    const char *k = c_type(kt);
+    const char *v = c_type(ty_val(t));
+    char *karr = ty_mangle(ty_array(ty_key(t)));
+    char *varr = ty_mangle(ty_array(ty_val(t)));
+    const char *hash = kt->kind == TY_STRING ? "klang_hash_str" : "klang_hash_int";
+    const char *cast = kt->kind == TY_STRING ? "" : "(int64_t)";
+    const char *eq   = kt->kind == TY_STRING ? "klang_str_eq(a, b)" : "a == b";
+
+    sb_appendf(sb, "typedef struct %s_slot { %s key; %s val; unsigned char state; } %s_slot;\n", m, k, v, m);
+    sb_appendf(sb, "typedef struct %s_s { int64_t len; int64_t cap; %s_slot *slots; } *%s;\n", m, m, m);
+    sb_appendf(sb, "int %s_keq(%s a, %s b) { return %s; }\n", m, k, k, eq);
+    sb_appendf(sb, "%s %s_new(void) {\n"
+                   "    %s d = klang_gc_alloc(sizeof(struct %s_s));\n"
+                   "    d->len = 0; d->cap = 8; d->slots = NULL;\n"
+                   "    d->slots = klang_gc_alloc(sizeof(%s_slot) * 8);\n"
+                   "    memset(d->slots, 0, sizeof(%s_slot) * 8);\n"
+                   "    return d;\n}\n", m, m, m, m, m, m);
+    /* Returns the slot holding `key`, or the first free slot it could go in. */
+    sb_appendf(sb, "int64_t %s_probe(%s d, %s key) {\n"
+                   "    int64_t mask = d->cap - 1;\n"
+                   "    int64_t i = (int64_t)(%s(%skey) & (uint64_t)mask);\n"
+                   "    int64_t first_free = -1;\n"
+                   "    while (d->slots[i].state) {\n"
+                   "        if (d->slots[i].state == 1 && %s_keq(d->slots[i].key, key)) return i;\n"
+                   "        if (d->slots[i].state == 2 && first_free < 0) first_free = i;\n"
+                   "        i = (i + 1) & mask;\n"
+                   "    }\n"
+                   "    return first_free >= 0 ? first_free : i;\n}\n", m, m, k, hash, cast, m);
+    sb_appendf(sb, "void %s_put(%s d, %s key, %s val);\n", m, m, k, v);
+    sb_appendf(sb, "void %s_regrow(%s d) {\n"
+                   "    int64_t oldcap = d->cap;\n"
+                   "    %s_slot *old = d->slots;\n"
+                   "    %s_slot *ns = klang_gc_alloc(sizeof(%s_slot) * (size_t)(oldcap * 2));\n"
+                   "    memset(ns, 0, sizeof(%s_slot) * (size_t)(oldcap * 2));\n"
+                   "    d->slots = ns; d->cap = oldcap * 2; d->len = 0;\n"
+                   "    for (int64_t i = 0; i < oldcap; i++)\n"
+                   "        if (old[i].state == 1) %s_put(d, old[i].key, old[i].val);\n"
+                   "}\n", m, m, m, m, m, m, m);
+    sb_appendf(sb, "void %s_put(%s d, %s key, %s val) {\n"
+                   "    if ((d->len + 1) * 10 >= d->cap * 7) %s_regrow(d);\n"
+                   "    int64_t i = %s_probe(d, key);\n"
+                   "    if (d->slots[i].state != 1) d->len++;\n"
+                   "    d->slots[i].key = key; d->slots[i].val = val; d->slots[i].state = 1;\n"
+                   "}\n", m, m, k, v, m, m);
+    sb_appendf(sb, "int %s_has(%s d, %s key) {\n"
+                   "    int64_t i = %s_probe(d, key);\n"
+                   "    return d->slots[i].state == 1;\n}\n", m, m, k, m);
+    sb_appendf(sb, "%s *%s_at(%s d, %s key) {\n"
+                   "    int64_t i = %s_probe(d, key);\n"
+                   "    if (d->slots[i].state != 1) klang_no_key();\n"
+                   "    return &d->slots[i].val;\n}\n", v, m, m, k, m);
+    sb_appendf(sb, "void %s_remove(%s d, %s key) {\n"
+                   "    int64_t i = %s_probe(d, key);\n"
+                   "    if (d->slots[i].state == 1) { d->slots[i].state = 2; d->len--; }\n"
+                   "}\n", m, m, k, m);
+    sb_appendf(sb, "%s %s_keys(%s d) {\n"
+                   "    %s out = %s_new(0);\n"
+                   "    for (int64_t i = 0; i < d->cap; i++)\n"
+                   "        if (d->slots[i].state == 1) %s_push(out, d->slots[i].key);\n"
+                   "    return out;\n}\n", karr, m, m, karr, karr, karr);
+    sb_appendf(sb, "%s %s_values(%s d) {\n"
+                   "    %s out = %s_new(0);\n"
+                   "    for (int64_t i = 0; i < d->cap; i++)\n"
+                   "        if (d->slots[i].state == 1) %s_push(out, d->slots[i].val);\n"
+                   "    return out;\n}\n\n", varr, m, m, varr, varr, varr);
+}
+
 /* Collect the mangled names of named types a mono type embeds by value. */
 static void collect_deps(const Type *t, Vec *out) {
-    if (t->kind != TY_NAMED && t->kind != TY_ARRAY) return;
+    if (t->kind != TY_NAMED && t->kind != TY_ARRAY && t->kind != TY_MAP) return;
     VEC_PUSH_PTR(out, ty_mangle(t));
 }
 
@@ -2770,8 +3139,9 @@ static void emit_enum(EnumDecl *ed, SB *sb) {
 
 /* Types embed each other by value, so emit them in dependency order. */
 static void emit_types(SB *sb) {
-    int n_s = g_mono_structs.count, n_e = g_mono_enums.count, n_a = g_mono_arrays.count;
-    int total = n_s + n_e + n_a;
+    int n_s = g_mono_structs.count, n_e = g_mono_enums.count;
+    int n_a = g_mono_arrays.count, n_m = g_mono_maps.count;
+    int total = n_s + n_e + n_a + n_m;
     bool *done = calloc((size_t)total, sizeof(bool));
     Vec emitted; vec_init(&emitted, sizeof(char *));
 
@@ -2781,8 +3151,12 @@ static void emit_types(SB *sb) {
             if (done[i]) continue;
             StructDecl *sd = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl) : NULL;
             EnumDecl *ed = (!sd && i < n_s + n_e) ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl) : NULL;
-            Type *at = (!sd && !ed) ? VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type) : NULL;
-            const char *mangled = sd ? sd->mangled : ed ? ed->mangled : ty_mangle(at);
+            Type *at = (!sd && !ed && i < n_s + n_e + n_a)
+                     ? VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type) : NULL;
+            Type *mt = (!sd && !ed && !at)
+                     ? VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type) : NULL;
+            const char *mangled = sd ? sd->mangled : ed ? ed->mangled
+                                : ty_mangle(at ? at : mt);
 
             Vec deps; vec_init(&deps, sizeof(char *));
             if (sd) {
@@ -2794,9 +3168,15 @@ static void emit_types(SB *sb) {
                     for (int k = 0; k < v->payload.count; k++)
                         collect_deps(VEC_PTR(&v->payload, k, Type), &deps);
                 }
-            } else {
+            } else if (at) {
                 /* An array stores its elements inline, so the element type must be complete. */
                 collect_deps(ty_elem(at), &deps);
+            } else {
+                /* A map stores keys and values inline, and hands back arrays of both. */
+                collect_deps(ty_key(mt), &deps);
+                collect_deps(ty_val(mt), &deps);
+                collect_deps(ty_array(ty_key(mt)), &deps);
+                collect_deps(ty_array(ty_val(mt)), &deps);
             }
             bool ready = true;
             for (int j = 0; j < deps.count && ready; j++) {
@@ -2814,7 +3194,8 @@ static void emit_types(SB *sb) {
 
             if (sd) emit_struct(sd, sb);
             else if (ed) emit_enum(ed, sb);
-            else emit_array(at, sb);
+            else if (at) emit_array(at, sb);
+            else emit_map(mt, sb);
             VEC_PUSH_PTR(&emitted, (char *)mangled);
             done[i] = true;
             progress = true;
@@ -2825,7 +3206,9 @@ static void emit_types(SB *sb) {
         if (done[i]) continue;
         const char *m = i < n_s ? VEC_PTR(&g_mono_structs, i, StructDecl)->mangled
                       : i < n_s + n_e ? VEC_PTR(&g_mono_enums, i - n_s, EnumDecl)->mangled
-                      : ty_mangle(VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type));
+                      : i < n_s + n_e + n_a
+                          ? ty_mangle(VEC_PTR(&g_mono_arrays, i - n_s - n_e, Type))
+                          : ty_mangle(VEC_PTR(&g_mono_maps, i - n_s - n_e - n_a, Type));
         fail(0, "type '%s' is part of a cycle — recursive types need indirection, "
                 "which Klang does not have yet", m);
     }
@@ -2833,7 +3216,7 @@ static void emit_types(SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.5 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.6 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n\n");
@@ -3013,7 +3396,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.5)\n\n"
+        printf("klangc — Klang compiler (0.6)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -3021,7 +3404,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.5.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.6.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -3032,6 +3415,7 @@ int main(int argc, char **argv) {
     vec_init(&g_mono_enums, sizeof(EnumDecl *));
     vec_init(&g_mono_fns, sizeof(FnDecl *));
     vec_init(&g_mono_arrays, sizeof(Type *));
+    vec_init(&g_mono_maps, sizeof(Type *));
     vec_init(&g_fn_queue, sizeof(FnDecl *));
     vec_init(&g_xrefs, sizeof(XRef));
     vec_init(&g_loaded, sizeof(char *));

@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.5 — Phase 4 complete
+## Status: v0.6 — Phase 5 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -38,9 +38,16 @@ aspirational.
 - **Modules** — `import "std/math"`, with `pub` marking what crosses the boundary and
   everything else private by default. Import paths resolve from the project root, so a
   path always names one module; cycles are reported, not followed.
-- **A standard library has started**: [std/math](std/math.kkg) and [std/list](std/list.kkg).
+- **Maps `{K: V}`** — literals, insert-on-assign, `has` / `remove` / `keys` / `values`,
+  and `get` returning `Option<V>` when a key may be absent. One open-addressed hash map
+  is generated per key/value pair, so there is no boxing.
+- **Text** — four string primitives in the compiler, and everything else
+  (`split`, `join`, `trim`, `replace`, case, padding, `parseInt` → `Result`) written in
+  Klang in [std/string](std/string.kkg).
+- **A standard library has started**: [std/math](std/math.kkg),
+  [std/list](std/list.kkg), [std/string](std/string.kkg).
 
-Not yet: maps, closures, traits, concurrency, and all tooling
+Not yet: closures, traits, concurrency, and all tooling
 (REPL, formatter, linter, package manager). Integer overflow still wraps silently.
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
@@ -88,20 +95,22 @@ first_or(None, "default")     // default  — T = string, from the 2nd argument
 ```
 
 ```kkg
-// Modules: private by default, `pub` to export.
-import "std/list"
+// Modules: private by default, `pub` to export. Maps and text.
+import "std/string" as str
 
-fn main() {
-    match list.largest([5, 3, 9]) {
-        Some(v) => println("largest = ${v}"),
-        None    => println("empty"),
+fn wordCount(text: string) -> {string: int} {
+    let mut counts: {string: int} = {}
+    for w in str.split(str.toLower(text), " ") {
+        if has(counts, w) { counts[w] = counts[w] + 1 } else { counts[w] = 1 }
     }
+    return counts
 }
 ```
 
 See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase2.kkg](examples/phase2.kkg),
-[examples/modules.kkg](examples/modules.kkg), and
+[examples/modules.kkg](examples/modules.kkg),
+[examples/phase5.kkg](examples/phase5.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.5)
+# Klang Language Spec (v0.6)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -125,6 +125,60 @@ let grid = [[1, 2], [3, 4]]   // arrays nest
 
 Mutation follows the same rule as everything else: `let` is enough to read an array, but
 pushing to it or assigning into it requires `let mut`.
+
+### Maps
+
+`{K: V}` is a hash map. Like arrays it is a reference to a heap object, and the same
+mutation rule applies: reading needs only `let`, inserting or removing needs `let mut`.
+Keys must be `int`, `string` or `bool` — anything else is a compile error rather than a
+surprise at runtime.
+
+```kkg
+let ages = {"ada": 36, "alan": 41}
+let mut stock: {string: int} = {}      // an empty literal needs to know what it holds
+stock["apple"] = 3                     // inserts
+stock["apple"] = stock["apple"] + 1    // updates
+remove(stock, "apple")
+
+len(m)  has(m, k)  keys(m)  values(m)
+```
+
+Reading a missing key aborts, the same way an out-of-range array index does. When
+absence is a normal outcome, ask for it as a value instead:
+
+```kkg
+match get(ages, "bob") {
+    Some(a) => println("bob is ${a}"),
+    None    => println("no bob"),
+}
+```
+
+`keys` and `values` hand back arrays, so iterating is just the ordinary `for`:
+
+```kkg
+for name in keys(ages) { println("${name} is ${ages[name]}") }
+```
+
+### Text
+
+The compiler knows four string primitives; everything else lives in
+[std/string](../std/string.kkg), written in Klang on top of them. That is deliberate —
+the standard library should not be a privileged place with powers ordinary code lacks.
+
+```kkg
+substr(s, start, end)   // byte offsets, clamped — never reads out of range
+byte_at(s, i)           // bounds-checked byte value
+from_byte(code)         // one-byte string
+index_of(s, needle)     // byte offset, or -1
+```
+
+Built on those, `std/string` provides `split`, `join`, `replace`, `trim`, `toUpper`,
+`toLower`, `startsWith`, `endsWith`, `contains`, `charAt`, `repeat`, `reverse`,
+`padStart`, `padEnd`, and `parseInt` — which returns `Result<int, string>`, so bad input
+is a value you handle rather than a crash.
+
+Offsets are byte offsets. ASCII is exact; other UTF-8 passes through unchanged as long
+as you slice at boundaries found with `index_of`.
 
 ### Loops
 
@@ -286,7 +340,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.5, Phase 4 complete)
+## Implemented today (v0.6, Phase 5 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -319,6 +373,15 @@ let received = ch.receive()
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
 
+**Phase 5 additions**
+- **Maps** `{K: V}` — literals, indexing, insert-on-assign, `has`, `remove`, `keys`, `values`
+- `get(m, k)` returns `Option<V>`; reading a missing key aborts, as an array index does
+- Map keys restricted to `int`, `string`, `bool`, rejected at compile time otherwise
+- Open-addressed hash map emitted per (key, value) pair — no boxing, no function pointers
+- **String primitives**: `substr`, `byte_at`, `from_byte`, `index_of`
+- **`std/string`** — split, join, replace, trim, case, pad, reverse, `parseInt` returning
+  `Result` — all written in Klang, not built into the compiler
+
 **Phase 4 additions**
 - **Modules**: one file per module, `import "path"`, `as` for a second name
 - **`pub`** — private by default; only marked declarations cross a module boundary
@@ -338,7 +401,7 @@ Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
-- Maps, closures, traits
+- Closures, traits
 - Integer overflow still wraps silently rather than trapping
 - Recursive types (they need indirection, which the language does not have yet — the
   compiler rejects them with a clear message rather than looping)

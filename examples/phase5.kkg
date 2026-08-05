@@ -1,0 +1,96 @@
+// Phase 5: maps and text.
+
+import "std/string" as str
+import "std/list"
+
+fn wordCount(text: string) -> {string: int} {
+    let mut counts: {string: int} = {}
+    for raw in str.split(str.toLower(text), " ") {
+        let w = str.trim(raw)
+        if !str.isEmpty(w) {
+            if has(counts, w) {
+                counts[w] = counts[w] + 1
+            } else {
+                counts[w] = 1
+            }
+        }
+    }
+    return counts
+}
+
+fn main() {
+    // ── maps ──────────────────────────────────────────────────────────
+    let ages = {"ada": 36, "alan": 41, "grace": 45}
+    println("ada is ${ages["ada"]}")
+    println("map size = ${len(ages)}")
+    println("has grace? ${has(ages, "grace")}   has bob? ${has(ages, "bob")}")
+
+    // Missing keys are not silent: `get` hands back an Option you must handle.
+    match get(ages, "bob") {
+        Some(a) => println("bob is ${a}"),
+        None    => println("bob is not in the map"),
+    }
+
+    let mut inventory: {string: int} = {}
+    inventory["apple"] = 3
+    inventory["pear"] = 7
+    inventory["apple"] = inventory["apple"] + 1
+    remove(inventory, "pear")
+    println("apples = ${inventory["apple"]}, entries = ${len(inventory)}")
+
+    // keys() and values() give arrays, so the existing for-in works.
+    let scores = {1: "gold", 2: "silver", 3: "bronze"}
+    let mut total = 0
+    for k in keys(scores) {
+        total = total + k
+    }
+    println("medal keys sum = ${total}, values = ${len(values(scores))}")
+
+    // ── strings ───────────────────────────────────────────────────────
+    let title = "  Klang Programming Language  "
+    println("trimmed   = '${str.trim(title)}'")
+    println("upper     = ${str.toUpper(str.trim(title))}")
+    println("split     = ${len(str.split(str.trim(title), " "))} words")
+    println("replace   = ${str.replace("a-b-c", "-", " + ")}")
+    println("startsWith= ${str.startsWith(str.trim(title), "Klang")}")
+    println("reverse   = ${str.reverse("Klang")}")
+    println("padStart  = '${str.padStart("7", 3, "0")}'")
+
+    // Parsing is a Result, so bad input is a value rather than a crash.
+    match str.parseInt("  -42 ") {
+        Ok(n)  => println("parseInt  = ${n}"),
+        Err(e) => println("parseInt  = error: ${e}"),
+    }
+    match str.parseInt("12x") {
+        Ok(n)  => println("parseInt  = ${n}"),
+        Err(e) => println("parseInt  = error: ${e}"),
+    }
+
+    // ── both together ─────────────────────────────────────────────────
+    let counts = wordCount("the quick the lazy the dog quick")
+    let words = keys(counts)
+    println("distinct words = ${len(words)}")
+    println("'the' appears ${counts["the"]} times")
+    println("'quick' appears ${counts["quick"]} times")
+
+    let mut occurrences = 0
+    for w in words {
+        occurrences = occurrences + counts[w]
+    }
+    println("total words    = ${occurrences}")
+    assert(occurrences == 7, "word count must add up")
+
+    // Maps of arrays, and maps built from other modules' output.
+    let mut groups: {string: [string]} = {}
+    for w in words {
+        let initial = str.charAt(w, 0)
+        if !has(groups, initial) {
+            groups[initial] = []
+        }
+        push(groups[initial], w)
+    }
+    let initials = list.reversed(keys(groups))
+    println("grouped under ${len(initials)} initials")
+
+    println("phase5: ok")
+}

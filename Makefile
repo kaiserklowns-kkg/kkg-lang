@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -std=c99 -Wall -Wextra -O2
-EXAMPLES := hello basics phase1 phase2 gc modules
+EXAMPLES := hello basics phase1 phase2 gc modules phase5
 
 all: bin/klangc
 

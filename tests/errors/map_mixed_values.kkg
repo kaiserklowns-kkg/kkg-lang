@@ -1,0 +1,4 @@
+fn main() {
+    let m = {"a": 1, "b": "two"}
+    println("${len(m)}")
+}
