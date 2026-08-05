@@ -1132,12 +1132,39 @@ Generated C compiles clean under `-Wall -Wextra`.
 
 ## Not yet implemented
 
-- Traits
+**Language**
 
-- Recursive types (they need indirection, which the language does not have yet — the
-  compiler rejects them with a clear message rather than looping)
-- `toString` / `==` on structs and enums (match on them instead)
-- Thread/channel send-ownership checking, `spawn`/`await`
-- Any backend other than C (LLVM is not planned near-term — C gets us "every platform"
-  for free via the host's C toolchain)
-- Tooling: REPL, formatter, linter, package manager — all future work, not started
+- **Traits** — no way to say "any type with these operations". Generics are
+  unbounded, so a generic function can only do what works for every type.
+- **`toString` / `==` on structs and enums** — `match` on them instead. `==` works
+  on numbers, bools and strings.
+- **Blocks as values** — a brace pair holds statements or one expression, never
+  "statements ending in a value". `if` as an expression takes one expression per
+  branch for this reason.
+
+**Runtime and library**
+
+- **Threads on the web** — `spawn` needs `-pthread`, and in a browser
+  `SharedArrayBuffer` with cross-origin isolation. Native threads work.
+- **Blocking HTTP in the browser** — [std/fetch](../std/fetch.kkg) is
+  callback-based; the reasons are in [Talking to a
+  server](#talking-to-a-server).
+- **`std/net` on Windows** — POSIX sockets only; Winsock is a separate variant.
+- **Command-line arguments and environment variables** — a program takes no input
+  but what it computes or reads with `std/fs`.
+- **Time, randomness, and float parsing** — `dom.now()` exists in the browser;
+  there is no native clock, no RNG, and `std/string` has no float parser.
+  `std/json` reads floats but refuses exponent notation rather than misreading it.
+- **Unicode** — strings are bytes. ASCII is exact and UTF-8 passes through
+  unchanged, but there is no notion of a character, and no case-folding beyond
+  ASCII.
+- **A compacting or generational collector** — the collector is precise now, which
+  removes the obstacle, but objects still never move.
+
+**Tooling**
+
+- **A package manager** — `import` reaches the standard library and your own
+  files. There is no way to depend on someone else's code.
+- **REPL, formatter, linter, language server** — none started.
+- **Any backend other than C** — LLVM is not planned near-term; C gets us "every
+  platform" for free through the host's toolchain, and WASM through emcc.

@@ -109,10 +109,13 @@ aspirational.
   each. The dev server is generated rather than depended on, and `make check`
   scaffolds all three project kinds and runs them.
 
-Still missing: threads on the web (they need `SharedArrayBuffer` and cross-origin
-isolation), traits, and the rest of the tooling — a package manager, a REPL, a
-formatter, a linter.
-`std/net` is POSIX only; Windows needs the Winsock variant.
+Still missing, in the order it is likely to bite: **traits** (generics are
+unbounded, so a generic function can only do what works for every type), a
+**package manager** (`import` reaches the standard library and your own files, and
+no further), **command-line arguments**, a **native clock and RNG**, **threads on
+the web** (they need `SharedArrayBuffer` and cross-origin isolation — native
+threads work), and **Unicode beyond bytes**. `std/net` is POSIX only; Windows
+needs the Winsock variant. No REPL, formatter, linter or language server.
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
