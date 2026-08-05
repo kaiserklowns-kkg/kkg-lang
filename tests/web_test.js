@@ -15,7 +15,7 @@ if (!path) {
 }
 
 const { install } = require("./stub_dom.js");
-const { app, q, all, byText, store, navigate } = install();
+const { app, q, all, byText, store, navigate, styleText } = install();
 
 // A stub server, so the network path is exercised rather than assumed. Both
 // outcomes are scripted: `reply` decides what the next request gets.
@@ -70,6 +70,14 @@ setTimeout(async () => {
   check("heading text", q("h1").textContent, "Klang in the browser");
   check("the input exists", q("#entry") !== null, true);
   contains("main logged", logs.join("\n"), "klang: ready, 3 tasks");
+
+  // ── the stylesheet came from Klang too, not from a .css file ────────
+  const sheet = styleText();
+  check("a stylesheet was installed", sheet.length > 0, true);
+  contains("a plain rule", sheet, "max-width:34rem;");
+  contains("a pseudo-class", sheet, "button:hover {");
+  contains("a media query", sheet, "@media (max-width: 30rem) {");
+  check("only one style element", document.head.children.length, 1);
 
   // ── first load: seeded, rendered, titled ────────────────────────────
   contains("initial render", q("#list").textContent, "write a language");

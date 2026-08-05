@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.21 — Phase 20 complete
+## Status: v0.22 — Phase 21 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -78,6 +78,7 @@ aspirational.
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
   [std/http](std/http.kkg), [std/json](std/json.kkg), [std/html](std/html.kkg),
+  [std/css](std/css.kkg),
   [std/dom](std/dom.kkg), [std/fetch](std/fetch.kkg).
 - **WASM** — Klang compiles to WASM and runs there correctly. Every example passes
   under Node except the two that need POSIX sockets or threads. This is what the
@@ -86,13 +87,14 @@ aspirational.
   [docs/WASM.md](docs/WASM.md) for the before/after measurements.
 - **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces
   hold one expression and `else` is required, so braces keep meaning one thing.
-- **The page is Klang** — [std/html](std/html.kkg) makes markup a value, so
-  escaping is structural (a `text` node cannot inject a tag, and `raw` has to be
-  typed on purpose) and a handler is attached where the element is built:
+- **You write Klang and nothing else** — no HTML, no CSS, no JavaScript, no C.
+  A web project is one `.kkg` file: [std/html](std/html.kkg) makes markup a value,
+  so escaping is structural (a `text` node cannot inject a tag, and `raw` has to
+  be typed on purpose) and a handler is attached where the element is built —
   `html.on("click", "addTask")` needs no id and no wiring elsewhere.
-  `dom.mount` puts a tree on the page and `dom.delegate` installs one listener
-  that covers everything mounted later. `index.html` holds a `<div id="app">` and
-  no application markup at all.
+  [std/css](std/css.kkg) does the same for styling, with property names as
+  functions so a misspelling is a compile error. klangc writes the page shell at
+  build time. `make check` asserts a fresh project contains nothing but Klang.
 - **Frontend** — `js fn` declares a function whose body is JavaScript and lets the
   compiler marshal the boundary; `export fn` makes a Klang function callable from
   JavaScript; module-level `let mut` holds the state an event handler needs.

@@ -40,10 +40,17 @@ ${CC:-cc} -std=c99 -Wall -Wextra -Werror -O1 -c demo-server/out.c -o /dev/null \
   || fail "the server template's generated C is not warning-clean"
 echo "  server  builds"
 
-# ── the stylesheet is a file, and the page links it ───────────────────
+# ── a web project is Klang and nothing else ───────────────────────────
+#
+# The whole point: no .html, no .css, no .js, no .c. The markup is std/html and
+# the styling std/css; klangc writes the page shell at build time.
 "$KLANGC" new demo-web > /dev/null
-grep -q 'href="style.css"' demo-web/web/index.html || fail "the page does not link its stylesheet"
-[ -s demo-web/web/style.css ] || fail "no stylesheet was written"
+strays=$(find demo-web -type f ! -name "*.kkg" ! -name "README.md" ! -name ".gitignore")
+[ -z "$strays" ] || fail "a fresh web project should be Klang only, but has:
+$strays"
+grep -q 'std/html' demo-web/src/main.kkg || fail "the template does not build its markup in Klang"
+grep -q 'std/css' demo-web/src/main.kkg || fail "the template does not build its styling in Klang"
+echo "  web     a fresh project is .kkg and nothing else"
 
 # ── tailwind: the scaffold has to point Tailwind at the Klang source ──
 "$KLANGC" new demo-tw --css tailwind > /dev/null
@@ -81,7 +88,7 @@ cat > drive.js <<EOF
 // Klang, so this also checks that std/html and delegation work in the template
 // everyone starts from.
 const { install } = require("$HERE/tests/stub_dom.js");
-const { app, q, byText } = install();
+const { app, q, byText, styleText } = install();
 const Module = require(process.argv[2]);
 setTimeout(() => {
   const want = (got, exp, what) => {
@@ -91,11 +98,14 @@ setTimeout(() => {
     }
   };
   want(q("h1") !== null, true, "the heading was built by Klang");
+  want(styleText().includes("max-width:32rem;"), true, "the styling was built by Klang");
   want(q("#count").textContent, "0 clicks", "first render");
   app.fire("click", byText("button", "click me"));
   app.fire("click", byText("button", "click me"));
   want(q("#count").textContent, "2 clicks", "after two clicks, via delegation");
-  console.log("  web     runs, its markup is Klang, and the button counts");
+  console.log("  web     runs — markup and styling both Klang, and the button counts");
 }, 200);
 EOF
-"$JS" drive.js "$WORK/demo-web/web/app.js"
+# The build output lives under .klang/, because the project has no web/ of its
+# own — it has no non-Klang files at all.
+"$JS" drive.js "$WORK/demo-web/.klang/main/app.js"

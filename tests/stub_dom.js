@@ -124,13 +124,22 @@ function install() {
   const store = new Map();
   const windowListeners = {};
 
+  // std/css renders into a <style> that std/dom appends to the head, so the head
+  // is real enough here for the stylesheet to be inspected.
+  const head = new El("head");
   globalThis.document = {
     title: "",
+    head,
     querySelector: (sel) => {
-      for (const n of app.walk()) if (matches(n, sel)) return n;
+      for (const root of [app, head]) {
+        for (const n of root.walk()) if (matches(n, sel)) return n;
+      }
       return null;
     },
+    getElementById: (id) => globalThis.document.querySelector("#" + id),
+    createElement: (tag) => new El(tag),
   };
+  head.appendChild = (el) => { el.parent = head; head.children.push(el); };
   globalThis.localStorage = {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, v),
@@ -143,8 +152,10 @@ function install() {
 
   const q = (sel) => globalThis.document.querySelector(sel);
   return {
-    app, store,
+    app, head, store,
     q,
+    styleText: () => head.children.filter((c) => c.tag === "style")
+                                  .map((c) => c.textContent).join(""),
     all: () => [...app.walk()],
     byText: (tag, t) => [...app.walk()].find((n) => n.tag === tag && n.textContent.trim() === t),
     navigate: (hash) => {

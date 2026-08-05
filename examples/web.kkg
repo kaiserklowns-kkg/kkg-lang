@@ -1,14 +1,14 @@
 // A web application written entirely in Klang.
 //
-// The page is built here as values, not as strings and not in an .html file:
-// index.html is a six-line shell with an empty <div id="app">. Everything you see
-// — the heading, the form, the filters, the list, the buttons and every handler —
-// is below.
+// There is no .html file and no .css file. Everything you see — the heading, the
+// form, the filters, the list, every button, and all the styling — is built here
+// as values. klangc writes the page shell at build time: a div and a script tag.
 //
 //     klangc web run examples/web.kkg
 
 import "std/dom"
 import "std/html"
+import "std/css"
 import "std/fetch"
 import "std/list"
 import "std/json"
@@ -28,6 +28,81 @@ let mut filter = "all"
 let mut message = ""
 
 const STORE_KEY = "klang.tasks"
+
+// ── styling ───────────────────────────────────────────────────────────
+//
+// A stylesheet is a Klang value too. The property names are functions, so a
+// misspelling is a compile error rather than a rule the browser quietly drops.
+
+fn styles() -> [css.Block] {
+    return [
+        css.rule(":root", [css.colorScheme("light dark")]),
+        css.rule("body", [
+            css.font("16px/1.5 system-ui, sans-serif"),
+            css.maxWidth("34rem"),
+            css.margin("3rem auto"),
+            css.padding("0 1rem"),
+        ]),
+        css.rule("h1", [css.fontSize("1.4rem"), css.marginBottom(".2rem")]),
+        css.rule(".sub", [css.marginTop("0"), css.opacity(".7"), css.fontSize(".9rem")]),
+
+        css.rule("form", [css.display("flex"), css.gap(".5rem"), css.margin("1.2rem 0 .8rem")]),
+        css.rule("input", [
+            css.flex("1"),
+            css.padding(".5rem .7rem"),
+            css.border("1px solid #8886"),
+            css.radius(".4rem"),
+            css.background("transparent"),
+            css.color("inherit"),
+            css.font("inherit"),
+        ]),
+        css.rule("button", [
+            css.padding(".5rem .9rem"),
+            css.border("1px solid #8886"),
+            css.radius(".4rem"),
+            css.background("transparent"),
+            css.color("inherit"),
+            css.font("inherit"),
+            css.cursor("pointer"),
+        ]),
+        css.rule("button:hover", [css.background("#8882")]),
+
+        css.rule("nav", [css.display("flex"), css.gap(".4rem"),
+                         css.fontSize(".85rem"), css.marginBottom(".8rem")]),
+        css.rule("nav a", [css.padding(".2rem .6rem"), css.radius(".3rem"),
+                           css.textDecoration("none"), css.color("inherit"),
+                           css.opacity(".6")]),
+        css.rule("nav a.on", [css.opacity("1"), css.background("#8883")]),
+
+        css.rule("ul", [css.listStyle("none"), css.padding("0"), css.margin("0"),
+                        css.border("1px solid #8884"), css.radius(".5rem")]),
+        css.rule("li", [css.display("flex"), css.align("center"), css.gap(".6rem"),
+                        css.padding(".45rem .6rem"), css.borderBottom("1px solid #8882")]),
+        css.rule("li:last-child", [css.borderBottom("0")]),
+        css.rule("li span", [css.flex("1")]),
+        css.rule("li.done span", [css.opacity(".45"), css.textDecoration("line-through")]),
+        css.rule("li.empty", [css.opacity(".5"), css.fontStyle("italic"),
+                              css.justify("center")]),
+        css.rule("li button", [css.border("0"), css.padding(".15rem .45rem"),
+                               css.fontSize("1rem"), css.opacity(".6")]),
+        css.rule("li button:hover", [css.opacity("1")]),
+
+        css.rule(".status", [css.display("flex"), css.justify("space-between"),
+                             css.align("center"), css.gap(".5rem"),
+                             css.fontSize(".85rem"), css.opacity(".75"),
+                             css.marginTop(".8rem")]),
+        css.rule(".status .message", [css.flex("1"), css.textAlign("center")]),
+        css.rule(".status button", [css.padding(".3rem .6rem")]),
+
+        css.rule(".sr-only", [css.position("absolute"), css.width("1px"),
+                              css.height("1px"), css.overflow("hidden")]),
+
+        css.media("(max-width: 30rem)", [
+            css.rule("body", [css.margin("1.5rem auto")]),
+            css.rule("h1", [css.fontSize("1.2rem")]),
+        ]),
+    ]
+}
 
 // ── the page ──────────────────────────────────────────────────────────
 //
@@ -93,10 +168,10 @@ fn shell() -> html.Node {
     return html.div([], [
         html.h1([], [html.text("Klang in the browser")]),
         html.p([html.class("sub")], [
-            html.text("This whole page is "),
+            html.text("Markup, styling, state and every handler are "),
             html.a([html.href("../web.kkg")], [html.text("examples/web.kkg")]),
-            html.text(" — built as Klang values, compiled to WebAssembly. "),
-            html.text("There is no HTML file behind it beyond an empty div."),
+            html.text(" — Klang values, compiled to WebAssembly. There is no HTML "),
+            html.text("file and no CSS file behind this page."),
         ]),
         html.form([html.on("submit", "addTask")], [
             html.label([html.class("sr-only")], [html.text("Task")]),
@@ -296,6 +371,8 @@ export fn remaining() -> int {
 fn main() {
     load()
 
+    dom.setTitle("Klang in the browser")
+    dom.useStyle(css.sheet(styles()))
     dom.mount("#app", shell())
     // One listener each, on the container. Everything mounted later is covered,
     // because the listener is not on the elements.

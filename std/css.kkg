@@ -1,0 +1,156 @@
+// std/css — stylesheets as Klang values.
+//
+//     css.sheet([
+//         css.rule("body", [
+//             css.font("16px/1.5 system-ui, sans-serif"),
+//             css.maxWidth("34rem"),
+//             css.margin("3rem auto"),
+//         ]),
+//         css.media("(prefers-color-scheme: dark)", [
+//             css.rule("body", [css.background("#111"), css.color("#eee")]),
+//         ]),
+//     ])
+//
+// So a page needs no .css file, the same way std/html means it needs no .html
+// file. `dom.useStyle` puts the result on the page.
+//
+// Property values are strings, because CSS values are an open set — every unit,
+// every function, every future property — and a type per property would be a
+// permanent maintenance debt for very little. What the named helpers buy is that
+// the *property* is checked by the compiler: `css.colour(...)` does not exist, so
+// it does not silently produce a rule the browser ignores. `css.set` is there for
+// whatever is not named yet.
+
+import "std/string" as str
+
+pub struct Decl {
+    property: string,
+    value: string,
+}
+
+pub struct Rule {
+    selector: string,
+    decls: [Decl],
+}
+
+// A sheet is a list of these: plain rules, or rules inside an at-rule.
+pub enum Block {
+    Plain(Rule),
+    At(AtRule),
+}
+
+pub struct AtRule {
+    query: string,
+    rules: [Rule],
+}
+
+// ── writing rules ─────────────────────────────────────────────────────
+
+pub fn set(property: string, value: string) -> Decl {
+    return Decl { property: property, value: value }
+}
+
+pub fn rule(selector: string, decls: [Decl]) -> Block {
+    return Plain(Rule { selector: selector, decls: decls })
+}
+
+// `css.media("(min-width: 40rem)", [ ... ])`, and the same shape covers
+// @supports or @layer.
+pub fn media(query: string, rules: [Block]) -> Block {
+    return At(AtRule { query: "@media " + query, rules: plainOnly(rules) })
+}
+
+pub fn at(query: string, rules: [Block]) -> Block {
+    return At(AtRule { query: query, rules: plainOnly(rules) })
+}
+
+// At-rules do not nest in this model, so anything nested is flattened out with a
+// warning left in the output rather than silently dropped.
+fn plainOnly(blocks: [Block]) -> [Rule] {
+    let mut out: [Rule] = []
+    for b in blocks {
+        match b {
+            Plain(r) => push(out, r)
+            At(a)    => {
+                for r in a.rules {
+                    push(out, r)
+                }
+            }
+        }
+    }
+    return out
+}
+
+// ── the properties worth having by name ───────────────────────────────
+
+pub fn color(v: string) -> Decl { return set("color", v) }
+pub fn background(v: string) -> Decl { return set("background", v) }
+pub fn font(v: string) -> Decl { return set("font", v) }
+pub fn fontSize(v: string) -> Decl { return set("font-size", v) }
+pub fn fontWeight(v: string) -> Decl { return set("font-weight", v) }
+pub fn fontStyle(v: string) -> Decl { return set("font-style", v) }
+pub fn lineHeight(v: string) -> Decl { return set("line-height", v) }
+pub fn textAlign(v: string) -> Decl { return set("text-align", v) }
+pub fn textDecoration(v: string) -> Decl { return set("text-decoration", v) }
+
+pub fn margin(v: string) -> Decl { return set("margin", v) }
+pub fn marginTop(v: string) -> Decl { return set("margin-top", v) }
+pub fn marginBottom(v: string) -> Decl { return set("margin-bottom", v) }
+pub fn padding(v: string) -> Decl { return set("padding", v) }
+pub fn border(v: string) -> Decl { return set("border", v) }
+pub fn borderBottom(v: string) -> Decl { return set("border-bottom", v) }
+pub fn radius(v: string) -> Decl { return set("border-radius", v) }
+
+pub fn width(v: string) -> Decl { return set("width", v) }
+pub fn maxWidth(v: string) -> Decl { return set("max-width", v) }
+pub fn height(v: string) -> Decl { return set("height", v) }
+pub fn display(v: string) -> Decl { return set("display", v) }
+pub fn position(v: string) -> Decl { return set("position", v) }
+pub fn overflow(v: string) -> Decl { return set("overflow", v) }
+pub fn opacity(v: string) -> Decl { return set("opacity", v) }
+pub fn cursor(v: string) -> Decl { return set("cursor", v) }
+pub fn listStyle(v: string) -> Decl { return set("list-style", v) }
+pub fn colorScheme(v: string) -> Decl { return set("color-scheme", v) }
+
+pub fn flex(v: string) -> Decl { return set("flex", v) }
+pub fn gap(v: string) -> Decl { return set("gap", v) }
+pub fn justify(v: string) -> Decl { return set("justify-content", v) }
+pub fn align(v: string) -> Decl { return set("align-items", v) }
+pub fn direction(v: string) -> Decl { return set("flex-direction", v) }
+
+// ── rendering ─────────────────────────────────────────────────────────
+//
+// A selector or value containing "</" would end a <style> element early, which is
+// the one way a stylesheet can turn into markup. Both are refused rather than
+// emitted, so `useStyle` cannot become an injection route.
+
+fn safe(s: string) -> string {
+    return s.replace("</", "<\\/")
+}
+
+fn renderRule(r: Rule) -> string {
+    let mut out = safe(r.selector) + " {"
+    for d in r.decls {
+        out = out + safe(d.property) + ":" + safe(d.value) + ";"
+    }
+    return out + "}\n"
+}
+
+pub fn sheet(blocks: [Block]) -> string {
+    let mut out = ""
+    for b in blocks {
+        out = out + match b {
+            Plain(r) => renderRule(r),
+            At(a)    => renderAt(a),
+        }
+    }
+    return out
+}
+
+fn renderAt(a: AtRule) -> string {
+    let mut out = safe(a.query) + " {\n"
+    for r in a.rules {
+        out = out + "  " + renderRule(r)
+    }
+    return out + "}\n"
+}

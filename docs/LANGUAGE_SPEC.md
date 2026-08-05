@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.21)
+# Klang Language Spec (v0.22)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -33,6 +33,15 @@
 - **Klang compiles to native executables.** `klangc build` produces a binary the
   operating system runs directly, linked against nothing but the C library — no runtime
   to ship, no interpreter, no JavaScript. `--static` needs not even libc.
+- **You write Klang and nothing else.** Not HTML, not CSS, not JavaScript, not C.
+  A web project is `src/main.kkg`: markup from [std/html](#the-page-itself), styling
+  from [std/css](#stylesheets-in-klang), and a page shell klangc writes at build
+  time. A native program is the same file with no browser involved. Where a
+  boundary to another language is unavoidable — syscalls, the DOM — the standard
+  library crosses it **once**, behind a safe API, so that your code never does.
+  Every language does this; Go's runtime is C and assembly, Rust's `std` calls
+  libc. The line worth holding is that it stays inside the library, and `grep
+  unsafe` finds every place it is crossed.
 - **C is the intermediate form**, the way assembly is for a traditional compiler:
   `.kkg` → C → whatever C compiler is on the host. That is what makes "every platform"
   achievable without writing N native backends up front, and it is why the same source
@@ -684,10 +693,11 @@ there is one. So a button needs no id, no selector, and no matching line elsewhe
 in `main`. One listener covers everything mounted later, because it is on the
 container rather than on the elements.
 
-**`index.html` holds no application markup.** It declares the charset, the
-stylesheet and the script, and an empty `<div id="app">`. `klangc new` writes that
-shell, and `klangc web run` generates one if a project has none, so a page can be
-written without touching HTML at all.
+**There is no `index.html`.** klangc writes the shell — charset, viewport, title,
+script, and an empty `<div id="app">` — at build time, and regenerates it whenever
+it is missing. `klangc new` does not create one, so a fresh web project is a
+single `.kkg` file. Write your own beside the program if you want control of the
+`<head>` (a font link, an extra `<meta>`) and that one is used instead.
 
 What Klang does not have is a diffing DOM. Re-mounting a subtree replaces it, which
 would throw away what is being typed into an `<input>`, so the static chrome is
@@ -695,11 +705,45 @@ mounted once and the parts that change are re-mounted from the state. That split
 explicit in [examples/web.kkg](../examples/web.kkg) rather than hidden behind a
 framework.
 
-### Stylesheets
+### Stylesheets, in Klang
 
-A `.css` file needs nothing from Klang. It is a static file, the dev server sends
-it with the right type, and `klangc new` writes one and links it — a file rather
-than a `<style>` block, so that swapping in a real one changes nothing else.
+A stylesheet is a value too, so a page needs no `.css` file either:
+
+```kkg
+fn styles() -> [css.Block] {
+    return [
+        css.rule("body", [
+            css.font("16px/1.5 system-ui, sans-serif"),
+            css.maxWidth("34rem"),
+            css.margin("3rem auto"),
+        ]),
+        css.rule("button:hover", [css.background("#8882")]),
+        css.media("(max-width: 30rem)", [
+            css.rule("body", [css.margin("1.5rem auto")]),
+        ]),
+    ]
+}
+
+dom.useStyle(css.sheet(styles()))
+```
+
+Values are strings, because CSS values are an open set — every unit, every
+function, every property that does not exist yet — and a type per property would
+be permanent maintenance for very little. What the named helpers buy is that the
+**property** is checked: `css.colour(...)` does not exist, so it cannot silently
+produce a rule the browser drops. `css.set(property, value)` covers anything not
+named yet.
+
+`useStyle` replaces the sheet it installed last time rather than adding another,
+so a theme change does not pile up `<style>` elements. A selector or value
+containing `</` is refused, since that is the one way a stylesheet could turn
+into markup.
+
+### Stylesheets from somewhere else
+
+A `.css` file still works if you want one: it is a static file, the dev server
+sends it with the right type, and a `style.css` sitting in the page directory is
+linked by the generated shell. Nothing in Klang requires it.
 
 Tailwind is different, because it has to be compiled, and compiling it means
 knowing where the class names are. For Klang most of them are inside string
@@ -980,7 +1024,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.21, Phase 20 complete)
+## Implemented today (v0.22, Phase 21 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -1012,6 +1056,22 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 21 additions — no HTML file, no CSS file**
+- **`std/css`** — stylesheets as values: `rule`, `media`, `at`, `set`, and the
+  properties worth having by name so a misspelling is a compile error. A selector
+  or value containing `</` is refused, since that is the one route from a
+  stylesheet back into markup.
+- **`dom.useStyle`** — installs a sheet, replacing the one it installed before
+- **klangc writes `index.html` itself**, and regenerates it whenever it is
+  missing. `klangc new` writes no HTML and no CSS: a fresh web project is
+  `src/main.kkg`, a README and a `.gitignore`, and `make check` asserts there is
+  nothing else in it.
+- A directory named after the program is its page directory whether or not it
+  holds an `index.html`, since usually it will not
+- [examples/web.kkg](../examples/web.kkg) deleted its `index.html` and
+  `style.css`; both are now Klang, and the test checks the installed stylesheet
+  for a rule, a pseudo-class and a media query
 
 **Phase 20 additions — the page is Klang too**
 - **`std/html`** — markup as values. `Node` / `Element` / `Attr`, the tags worth
