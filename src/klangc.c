@@ -631,6 +631,9 @@ typedef struct {
     bool is_extern;    /* a C symbol, with no Klang body */
     bool is_unsafe;    /* callable only from an unsafe context */
     char *cname;       /* the C symbol to emit, when it differs from the name */
+    char *js_body;     /* `js fn`: the JavaScript between the braces, verbatim */
+    bool is_export;    /* `export fn`: reachable from JavaScript under its own name */
+    int line;
 } FnDecl;
 
 /* A module-level constant. Its initializer is an ordinary expression, evaluated
@@ -638,6 +641,7 @@ typedef struct {
 typedef struct {
     char *name; char *key; const char *module; const char *file; bool is_pub;
     Type *type; bool has_type; Expr *value; char *mangled; int line;
+    bool is_mut;   /* `let mut` at module level: state that outlives main */
 } ConstDecl;
 
 typedef enum { DECL_STRUCT, DECL_ENUM, DECL_FN, DECL_CONST } DeclKind;
@@ -678,6 +682,57 @@ static void p_advance(Parser *p) { p->cur = lex_next(&p->lx); }
 
 /* Which type names this file declares — needed while parsing, because a type may
    be referred to above its own declaration. */
+/* The body of a `js fn` is JavaScript, not Klang, so it is taken verbatim rather
+   than tokenized — a semicolon alone would stop the Klang lexer dead. The scan
+   tracks brace depth while skipping the three kinds of JavaScript string and both
+   kinds of comment. It does not understand regex literals; braces inside one have
+   to balance, which in practice they do.
+
+   `lx` must sit just past the opening brace. On return it sits just past the
+   matching close, and the text between them is the result. */
+static char *take_js_body(Lexer *lx, int open_line) {
+    const char *src = lx->src;
+    int i = lx->pos, start = i, depth = 1, line = lx->line;
+    while (depth > 0) {
+        char c = src[i];
+        if (!c) fail(open_line, "this JavaScript body is never closed — no matching '}'");
+        if (c == '\n') { line++; i++; continue; }
+        if (c == '/' && src[i + 1] == '/') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && src[i + 1] == '*') {
+            i += 2;
+            while (src[i] && !(src[i] == '*' && src[i + 1] == '/')) { if (src[i] == '\n') line++; i++; }
+            if (!src[i]) fail(open_line, "unterminated comment in this JavaScript body");
+            i += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`') {
+            char q = c;
+            i++;
+            while (src[i] && src[i] != q) {
+                if (src[i] == '\\' && src[i + 1]) i++;
+                else if (src[i] == '\n') line++;
+                i++;
+            }
+            if (!src[i]) fail(open_line, "unterminated string in this JavaScript body");
+            i++;
+            continue;
+        }
+        if (c == '{') depth++;
+        if (c == '}') depth--;
+        i++;
+    }
+    int len = i - 1 - start;      /* everything before the closing '}' */
+    char *body = malloc((size_t)len + 1);
+    memcpy(body, src + start, (size_t)len);
+    body[len] = '\0';
+    lx->pos = i;
+    lx->line = line;
+    return body;
+}
+
 static void prescan_types(Parser *p, const char *src) {
     Lexer lx;
     lexer_init(&lx, src);
@@ -687,6 +742,19 @@ static void prescan_types(Parser *p, const char *src) {
             Token n = lex_next(&lx);
             if (n.kind == TK_IDENT) VEC_PUSH_PTR(&p->local_types, n.text);
             t = n;
+            continue;
+        }
+        /* Step over `js fn f(...) { ...javascript... }` — the prescan runs over the
+           whole file, so it meets these bodies before the parser does. */
+        if (t.kind == TK_IDENT && strcmp(t.text, "js") == 0) {
+            Lexer save = lx;
+            Token n = lex_next(&lx);
+            if (n.kind != TK_FN) { lx = save; t = n; continue; }
+            int line = n.line;
+            while (n.kind != TK_LBRACE && n.kind != TK_EOF) n = lex_next(&lx);
+            if (n.kind == TK_EOF) fail(line, "this 'js fn' has no JavaScript body");
+            take_js_body(&lx, line);
+            t = lex_next(&lx);
             continue;
         }
         t = lex_next(&lx);
@@ -1318,6 +1386,13 @@ static Vec parse_block(Parser *p) {
     return body;
 }
 
+/* p->cur is the opening '{', so p->lx already sits just past it. */
+static char *scan_js_body(Parser *p, int open_line) {
+    char *body = take_js_body(&p->lx, open_line);
+    p_advance(p);                 /* move past the body to whatever follows */
+    return body;
+}
+
 /* The last segment of a module path is its default alias: "std/math" -> "math". */
 static const char *path_tail(const char *path) {
     const char *slash = strrchr(path, '/');
@@ -1354,7 +1429,21 @@ static void parse_program(Parser *p) {
         if (p_check(p, TK_IMPORT))
             fail(p->cur.line, "'import' must appear before any declaration");
         bool is_pub = p_match(p, TK_PUB);
-        bool is_extern = false, is_unsafe = false;
+        bool is_extern = false, is_unsafe = false, is_js = false, is_export = false;
+
+        /* `js` and `export` are contextual: only a `js fn` / `export fn` means
+           anything, so neither becomes a word you cannot use as a name. */
+        if (p_check(p, TK_IDENT) &&
+            (strcmp(p->cur.text, "js") == 0 || strcmp(p->cur.text, "export") == 0)) {
+            Lexer save_lx = p->lx;
+            Token save_cur = p->cur;
+            bool js = strcmp(p->cur.text, "js") == 0;
+            p_advance(p);
+            if (p_check(p, TK_FN)) {
+                if (js) { is_js = true; is_unsafe = true; }   /* Klang cannot vouch for JS */
+                else is_export = true;
+            } else { p->lx = save_lx; p->cur = save_cur; }
+        }
 
         /* `extern header "..."` and `extern link "..."` say what the generated C
            needs; they are build information, not declarations. */
@@ -1467,7 +1556,19 @@ static void parse_program(Parser *p) {
             fd->ret_type = p_match(p, TK_ARROW) ? parse_type(p) : ty_void();
             fd->is_extern = is_extern;
             fd->is_unsafe = is_unsafe;
-            if (is_extern) {
+            fd->is_export = is_export;
+            fd->line = fd_line;
+            if (is_export && fd->type_params.count != 0)
+                fail(fd_line, "an exported function cannot be generic — JavaScript "
+                              "would not know which instantiation to call");
+            if (is_js) {
+                if (fd->type_params.count != 0)
+                    fail(fd_line, "a 'js fn' cannot be generic — JavaScript has no types to specialize on");
+                if (!p_check(p, TK_LBRACE))
+                    fail(p->cur.line, "a 'js fn' needs a JavaScript body in braces");
+                fd->js_body = scan_js_body(p, fd_line);
+                vec_init(&fd->body, sizeof(Stmt *));
+            } else if (is_extern) {
                 if (fd->type_params.count != 0)
                     fail(fd_line, "an extern function cannot be generic — C has no generics");
                 /* `= "cos"` when the C symbol differs from the Klang name. */
@@ -1484,9 +1585,20 @@ static void parse_program(Parser *p) {
             Decl *d = vec_push(&g_decls);
             memset(d, 0, sizeof *d);
             d->kind = DECL_FN; d->f = fd;
-        } else if (p_check(p, TK_CONST)) {
+        } else if (p_check(p, TK_CONST) || p_check(p, TK_LET)) {
+            /* `const` never changes. `let mut` at module level is state that
+               outlives main — which an event-driven program needs, since a
+               callback runs long after main returned and cannot capture a local.
+               A plain module-level `let` would say nothing `const` does not. */
+            bool was_let = p_check(p, TK_LET);
+            int decl_line = p->cur.line;
             p_advance(p);
+            bool is_mut = p_match(p, TK_MUT);
+            if (was_let && !is_mut)
+                fail(decl_line, "a module-level 'let' that never changes is a 'const' — "
+                                "write 'const', or 'let mut' if it does change");
             ConstDecl *cd = calloc(1, sizeof(ConstDecl));
+            cd->is_mut = is_mut;
             cd->line = p->cur.line;
             cd->name = p_expect(p, TK_IDENT).text;
             cd->module = p->module; cd->file = p->file; cd->is_pub = is_pub;
@@ -1499,7 +1611,7 @@ static void parse_program(Parser *p) {
             memset(d, 0, sizeof *d);
             d->kind = DECL_CONST; d->c = cd;
         } else if (is_pub) {
-            fail(p->cur.line, "'pub' must be followed by 'fn', 'struct', 'enum' or 'const'");
+            fail(p->cur.line, "'pub' must be followed by 'fn', 'struct', 'enum', 'const' or 'let mut'");
         } else {
             fail(p->cur.line, "expected 'fn', 'struct', 'enum', 'const' or 'import' at top level");
         }
@@ -1940,8 +2052,8 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
     fd->file = generic->file; fd->is_pub = generic->is_pub;
     fd->is_extern = generic->is_extern; fd->is_unsafe = generic->is_unsafe;
     fd->cname = generic->cname;
-    fd->is_extern = generic->is_extern; fd->is_unsafe = generic->is_unsafe;
-    fd->cname = generic->cname;
+    fd->js_body = generic->js_body; fd->is_export = generic->is_export;
+    fd->line = generic->line;
     fd->mangled = mangled;
     vec_init(&fd->type_params, sizeof(char *));
     vec_init(&fd->params, sizeof(Field));
@@ -2193,8 +2305,19 @@ static char *labelf(const char *fmt, ...) {
 /* Walk to the variable an lvalue is rooted at, so we can check it was declared `mut`. */
 static Var *lvalue_root(Expr *e, Scope *sc) {
     while (e->kind == EX_FIELD || e->kind == EX_INDEX) e = e->lhs;
-    if (e->kind != EX_IDENT) return NULL;
-    return lookup_capturing(sc, e->sval);
+    /* EX_CONSTREF is what an EX_IDENT naming module state becomes once it has been
+       type-checked, and lvalue_root is called from both sides of that. */
+    if (e->kind != EX_IDENT && e->kind != EX_CONSTREF) return NULL;
+    Var *v = lookup_capturing(sc, e->sval);
+    if (v) return v;
+    /* Module-level state is not in any scope, but it is still assignable — and
+       carries its own `mut`, so the same rules apply to it as to a local. */
+    ConstDecl *cd = find_const(e->is_qual ? e->sval
+                               : qual_key(e->mod ? e->mod : g_cur_module, e->sval));
+    if (!cd || !cd->type) return NULL;
+    static Var global;
+    global.name = cd->name; global.type = cd->type; global.is_mut = cd->is_mut;
+    return &global;
 }
 
 /* Calling a closure value: the callee is in e->lhs and already typed. */
@@ -2520,7 +2643,11 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
     /* The whole point of the FFI safety story: a C call, or anything declared
        unsafe, can only be reached from a context that has taken responsibility. */
     if (fn->is_unsafe && g_unsafe_depth == 0)
-        fail(e->line, fn->is_extern
+        fail(e->line, fn->js_body
+                 ? "'%s' is a JavaScript function, so calling it is unsafe — Klang "
+                   "cannot check what JavaScript does. Wrap the call in 'unsafe { ... }', "
+                   "or expose it through a safe function, the way std/dom does"
+               : fn->is_extern
                  ? "'%s' is a C function, so calling it is unsafe — wrap the call in "
                    "'unsafe { ... }', or expose it through a safe function that checks "
                    "what C cannot"
@@ -3051,7 +3178,47 @@ static void tc_block(Vec *body, Scope *sc) {
     scope_pop(sc);
 }
 
+/* JavaScript has numbers, booleans and strings, and Klang's heap objects mean
+   nothing on the other side of that boundary. Rather than silently marshalling
+   something half-way, say so. */
+static bool js_can_cross(const Type *t) {
+    switch (t->kind) {
+        case TY_INT: case TY_FLOAT: case TY_BOOL: case TY_STRING: case TY_VOID: return true;
+        default: return false;
+    }
+}
+
+static void tc_js_signature(FnDecl *fd) {
+    if (fd->file) g_filename = fd->file;
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        if (!js_can_cross(pm->type) || pm->type->kind == TY_VOID)
+            fail(fd->line, "'%s' cannot cross into JavaScript: %s is %s, and only "
+                           "int, float, bool and string have a meaning on both sides",
+                 fd->name, pm->name, ty_str(pm->type));
+    }
+    if (!js_can_cross(fd->ret_type))
+        fail(fd->line, "'%s' cannot return %s to Klang: only int, float, bool and "
+                       "string cross back from JavaScript",
+             fd->name, ty_str(fd->ret_type));
+}
+
 static void tc_fn(FnDecl *fd) {
+    if (fd->js_body) { tc_js_signature(fd); return; }
+    if (fd->is_export) {
+        if (fd->file) g_filename = fd->file;
+        for (int i = 0; i < fd->params.count; i++) {
+            Field *pm = vec_get(&fd->params, i);
+            if (!js_can_cross(pm->type) || pm->type->kind == TY_VOID)
+                fail(fd->line, "'%s' is exported to JavaScript, so %s cannot be %s — "
+                               "only int, float, bool and string cross that boundary",
+                     fd->name, pm->name, ty_str(pm->type));
+        }
+        if (!js_can_cross(fd->ret_type))
+            fail(fd->line, "'%s' is exported to JavaScript, so it cannot return %s — "
+                           "only int, float, bool and string cross that boundary",
+                 fd->name, ty_str(fd->ret_type));
+    }
     Scope sc; scope_init(&sc); scope_push(&sc);
     for (int i = 0; i < fd->params.count; i++) {
         Field *pm = vec_get(&fd->params, i);
@@ -3169,6 +3336,24 @@ static const char *c_type(const Type *t) {
         default: return "void*";
     }
 }
+/* Every expression is emitted fully parenthesized, so a condition arrives as
+   "(a == b)" and `if ((a == b))` is what comes out — which clang flags as a
+   possible typo'd assignment. The outer pair is redundant inside `if (...)`, so
+   drop it when it wraps the whole expression. */
+static char *unwrap_cond(const char *s) {
+    size_t n = strlen(s);
+    if (n < 2 || s[0] != '(' || s[n - 1] != ')') return (char *)s;
+    int depth = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '(') depth++;
+        else if (s[i] == ')' && --depth == 0 && i != n - 1) return (char *)s;
+    }
+    char *inner = malloc(n - 1);
+    memcpy(inner, s + 1, n - 2);
+    inner[n - 2] = '\0';
+    return inner;
+}
+
 static char *fresh_tmp(void) {
     char *s = malloc(24);
     snprintf(s, 24, "_k%d", g_tmp++);
@@ -3820,7 +4005,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
                     cg_expr(cb->cond, &cval, &cpre, level);
                     sb_append(sb, cpre.data);
                     indent_to(sb, level);
-                    sb_appendf(sb, "if (%s) {\n", cval.data);
+                    sb_appendf(sb, "if (%s) {\n", unwrap_cond(cval.data));
                 } else {
                     indent_to(sb, level);
                     sb_append(sb, "{\n");
@@ -3843,7 +4028,7 @@ static void cg_stmt(Stmt *s, SB *sb, int ind) {
             cg_expr(s->expr, &cval, &cpre, ind + 1);
             if (cpre.len == 0) {
                 indent_to(sb, ind);
-                sb_appendf(sb, "while (%s) {\n", cval.data);
+                sb_appendf(sb, "while (%s) {\n", unwrap_cond(cval.data));
             { indent_to(sb, ind + 1); sb_append(sb, "K_POLL();\n"); }
                 cg_stmts(&s->body, sb, ind + 1);
                 indent_to(sb, ind);
@@ -4522,6 +4707,59 @@ static const char *RUNTIME =
     "    exit(1);\n"
     "}\n";
 
+/* ── the JavaScript boundary ──────────────────────────────────────────────
+ *
+ * JavaScript has one number type, a float64, so an int has to be handed across
+ * as a double. That is lossy above 2^53, and a language that checks integer
+ * overflow has no business quietly rounding here instead: both directions are
+ * checked and stop with a message rather than lying.
+ *
+ * Strings cross by copying. JavaScript's own string lives in the JS heap and its
+ * UTF-8 form is malloc'd by `stringToNewUTF8`, so the wrapper copies that into
+ * GC memory and frees it — a Klang string always belongs to the collector.
+ */
+static const char *JS_RUNTIME =
+    "/* ── JavaScript boundary ───────────────────────────────────────────── */\n"
+    "#ifdef __EMSCRIPTEN__\n"
+    "#include <emscripten.h>\n"
+    "#else\n"
+    "#define EMSCRIPTEN_KEEPALIVE\n"
+    "#endif\n"
+    "#define K_JS_EXACT 9007199254740992.0   /* 2^53: above this, doubles skip integers */\n"
+    "double klang_js_num(int64_t v, const char *fn) {\n"
+    "    if ((double)v > K_JS_EXACT || (double)v < -K_JS_EXACT) {\n"
+    "        fprintf(stderr, \"klang: %\" PRId64 \" cannot be passed to JavaScript by '%s' \"\n"
+    "                        \"without losing precision — JavaScript numbers are exact \"\n"
+    "                        \"only up to 2^53\\n\", v, fn);\n"
+    "        exit(1);\n"
+    "    }\n"
+    "    return (double)v;\n"
+    "}\n"
+    "int64_t klang_js_int(double d, const char *fn) {\n"
+    "    if (!(d == d) || d > K_JS_EXACT || d < -K_JS_EXACT || d != (double)(int64_t)d) {\n"
+    "        fprintf(stderr, \"klang: '%s' returned %g, which is not an int JavaScript \"\n"
+    "                        \"can represent exactly\\n\", fn, d);\n"
+    "        exit(1);\n"
+    "    }\n"
+    "    return (int64_t)d;\n"
+    "}\n"
+    "/* Takes ownership of a malloc'd UTF-8 string and hands back a GC-owned copy. */\n"
+    "char *klang_js_str(char *raw) {\n"
+    "    if (!raw) return klang_gc_alloc(1);\n"
+    "    size_t n = strlen(raw) + 1;\n"
+    "    char *out = klang_gc_alloc(n);\n"
+    "    memcpy(out, raw, n);\n"
+    "    free(raw);\n"
+    "    return out;\n"
+    "}\n"
+    "#ifndef __EMSCRIPTEN__\n"
+    "void klang_no_js(const char *fn) {\n"
+    "    fprintf(stderr, \"klang: '%s' is a JavaScript function, and this build has no \"\n"
+    "                    \"JavaScript host — compile it with emcc\\n\", fn);\n"
+    "    exit(1);\n"
+    "}\n"
+    "#endif\n\n";
+
 /* Arrays are heap objects behind a pointer, so pushing through one binding is
    visible through every other binding — no surprise copies. */
 /* An array is a pointer, so naming one needs nothing at all — this is what lets a
@@ -5001,6 +5239,157 @@ static void emit_lambda_env(Expr *lam, SB *sb) {
     sb_appendf(sb, "} _klam%d_env;\n", lam->lam_id);
 }
 
+/* How a Klang type looks on the JavaScript side of EM_JS. Everything numeric
+   goes as a double, because that is the only number JavaScript has. */
+static const char *js_c_type(const Type *t) {
+    switch (t->kind) {
+        case TY_VOID:   return "void";
+        case TY_STRING: return "char*";
+        case TY_BOOL:   return "int";
+        default:        return "double";   /* int and float */
+    }
+}
+
+/* The JavaScript half of every `js fn`, written to a companion `--js-library`
+ * file rather than into the C.
+ *
+ * EM_JS would keep everything in one file, but it stringifies the body through
+ * the C preprocessor, which collapses it onto a single line — so a body written
+ * in ordinary semicolon-free style silently becomes a JavaScript syntax error in
+ * generated code, which is a terrible thing to hand back to someone. A js-library
+ * file keeps the author's text exactly as written.
+ */
+static SB g_js_lib;
+static int g_js_count = 0;
+
+/* A `js fn` becomes a JavaScript library entry plus a Klang-facing wrapper that
+   does the marshalling, so no Klang source ever mentions UTF8ToString or a heap
+   pointer. */
+static void emit_js_fn(FnDecl *fd, SB *sb) {
+    const char *ret = c_type(fd->ret_type);
+    bool has_ret = fd->ret_type->kind != TY_VOID;
+    bool takes_str = false;
+    for (int i = 0; i < fd->params.count; i++)
+        if (((Field *)vec_get(&fd->params, i))->type->kind == TY_STRING) takes_str = true;
+    bool gives_str = fd->ret_type->kind == TY_STRING;
+
+    SB *js = &g_js_lib;
+    if (takes_str || gives_str) {
+        sb_appendf(js, "  _kjs_%s__deps: [", fd->mangled);
+        if (takes_str) sb_append(js, "'$UTF8ToString'");
+        if (takes_str && gives_str) sb_append(js, ", ");
+        if (gives_str) sb_append(js, "'$stringToNewUTF8'");
+        sb_append(js, "],\n");
+    }
+    sb_appendf(js, "  // %s.%s, from %s\n", fd->module ? fd->module : "", fd->name,
+               fd->file ? fd->file : "?");
+    sb_appendf(js, "  _kjs_%s: function(", fd->mangled);
+    for (int i = 0; i < fd->params.count; i++)
+        sb_appendf(js, "%s%s", i ? ", " : "", ((Field *)vec_get(&fd->params, i))->name);
+    sb_append(js, ") {\n");
+    /* Pointers become JavaScript strings, and 0/1 becomes a boolean, before the
+       author's code runs — so the body reads like ordinary JavaScript. */
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        if (pm->type->kind == TY_STRING)
+            sb_appendf(js, "    %s = UTF8ToString(%s);\n", pm->name, pm->name);
+        else if (pm->type->kind == TY_BOOL)
+            sb_appendf(js, "    %s = !!%s;\n", pm->name, pm->name);
+    }
+    /* The body is wrapped so its `return` produces a value this entry can convert
+       on the way out, rather than returning straight to C unmarshalled. */
+    if (has_ret) sb_append(js, "    var _kv = (function() {");
+    sb_append(js, fd->js_body);
+    if (has_ret) {
+        sb_append(js, "})();\n");
+        if (gives_str)
+            sb_append(js, "    return (_kv === undefined || _kv === null) ? 0 : stringToNewUTF8(String(_kv));\n");
+        else if (fd->ret_type->kind == TY_BOOL)
+            sb_append(js, "    return _kv ? 1 : 0;\n");
+        else
+            sb_append(js, "    return +_kv;\n");
+    }
+    sb_append(js, "  },\n");
+    g_js_count++;
+
+    sb_appendf(sb, "%s _kjs_%s(", js_c_type(fd->ret_type), fd->mangled);
+    if (fd->params.count == 0) sb_append(sb, "void");
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        sb_appendf(sb, "%s%s %s", i ? ", " : "", js_c_type(pm->type), pm->name);
+    }
+    sb_append(sb, ");\n");
+
+    sb_appendf(sb, "%s %s(", ret, fd->mangled);
+    if (fd->params.count == 0) sb_append(sb, "void");
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        sb_appendf(sb, "%s%s %s", i ? ", " : "", c_type(pm->type), pm->name);
+    }
+    sb_append(sb, ") {\n");
+    sb_append(sb, "#ifdef __EMSCRIPTEN__\n    ");
+    if (has_ret) sb_appendf(sb, "%s _kv = ", js_c_type(fd->ret_type));
+    sb_appendf(sb, "_kjs_%s(", fd->mangled);
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        if (i) sb_append(sb, ", ");
+        if (pm->type->kind == TY_INT)
+            sb_appendf(sb, "klang_js_num(%s, \"%s\")", pm->name, fd->name);
+        else sb_append(sb, pm->name);
+    }
+    sb_append(sb, ");\n");
+    if (has_ret) {
+        sb_append(sb, "    return ");
+        switch (fd->ret_type->kind) {
+            case TY_STRING: sb_append(sb, "klang_js_str(_kv);\n"); break;
+            case TY_INT:    sb_appendf(sb, "klang_js_int(_kv, \"%s\");\n", fd->name); break;
+            case TY_BOOL:   sb_append(sb, "_kv != 0;\n"); break;
+            default:        sb_append(sb, "_kv;\n"); break;
+        }
+    }
+    sb_append(sb, "#else\n");
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        sb_appendf(sb, "    (void)%s;\n", pm->name);
+    }
+    sb_appendf(sb, "    klang_no_js(\"%s\");\n", fd->name);
+    if (has_ret) sb_appendf(sb, "    return (%s){0};\n", ret);
+    sb_append(sb, "#endif\n}\n\n");
+}
+
+/* `export fn` gets a second symbol under its plain Klang name, kept alive so a
+   JavaScript caller can reach it as Module._name.
+ *
+ * Numbers cross as doubles in both directions, checked for exactness the same way
+ * `js fn` checks them — otherwise a Klang `int` would surface in JavaScript as a
+ * BigInt, which is technically right and practically a trap. Strings cross as
+ * pointers, which means a JavaScript caller reaches them through Module.ccall. */
+static void emit_js_export(FnDecl *fd, SB *sb) {
+    bool ret_int = fd->ret_type->kind == TY_INT;
+    sb_appendf(sb, "EMSCRIPTEN_KEEPALIVE %s %s(",
+               ret_int ? "double" : c_type(fd->ret_type), fd->name);
+    if (fd->params.count == 0) sb_append(sb, "void");
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        sb_appendf(sb, "%s%s %s", i ? ", " : "",
+                   pm->type->kind == TY_INT ? "double" : c_type(pm->type), pm->name);
+    }
+    sb_append(sb, ") {\n    ");
+    if (fd->ret_type->kind != TY_VOID)
+        sb_appendf(sb, "return %s", ret_int ? "klang_js_num(" : "");
+    sb_appendf(sb, "%s(", fd->mangled);
+    for (int i = 0; i < fd->params.count; i++) {
+        Field *pm = vec_get(&fd->params, i);
+        if (i) sb_append(sb, ", ");
+        if (pm->type->kind == TY_INT)
+            sb_appendf(sb, "klang_js_int(%s, \"%s\")", pm->name, fd->name);
+        else sb_append(sb, pm->name);
+    }
+    sb_append(sb, ")");
+    if (ret_int) sb_appendf(sb, ", \"%s\")", fd->name);
+    sb_append(sb, ";\n}\n\n");
+}
+
 /* The frame has to say how many slots it holds, and that is only known once the
    body has been emitted — so the body is built first and the prologue prepended. */
 static void emit_frame_prologue(SB *sb, int slots) {
@@ -5062,7 +5451,12 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.13 — do not edit by hand */\n");
+    sb_init(&g_js_lib);
+    sb_append(&g_js_lib, "// Generated by klangc 0.15 — the JavaScript half of this\n"
+                         "// program's 'js fn' declarations. Pass it to emcc with\n"
+                         "// --js-library; do not edit by hand.\n"
+                         "mergeInto(LibraryManager.library, {\n");
+    sb_append(sb, "/* Generated by klangc 0.15 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -5082,6 +5476,7 @@ static void codegen(SB *sb) {
     if (g_uses_threads) sb_append(sb, GC_THREADS);
     sb_append(sb, GC_COLLECT);
     sb_append(sb, RUNTIME);
+    sb_append(sb, JS_RUNTIME);
     sb_append(sb, "\n");
 
     emit_types(sb);
@@ -5234,6 +5629,7 @@ static void codegen(SB *sb) {
     for (int i = 0; i < g_mono_fns.count; i++) {
         FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
         if (fd->is_extern) continue;
+        if (fd->js_body) { emit_js_fn(fd, sb); continue; }
         bool is_main = strcmp(fd->name, "main") == 0;
         g_cg_ret = fd->ret_type;
         sb_appendf(sb, "%s %s(", is_main ? "int" : c_type(fd->ret_type), fd->mangled);
@@ -5259,6 +5655,11 @@ static void codegen(SB *sb) {
         sb_append(sb, body.data);
         sb_append(sb, "}\n\n");
         g_slot_count = 0;
+    }
+
+    for (int i = 0; i < g_mono_fns.count; i++) {
+        FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
+        if (fd->is_export) emit_js_export(fd, sb);
     }
 
     /* The collector scans from its own frame up to this anchor. Taking the anchor
@@ -5450,6 +5851,27 @@ int main(int argc, char **argv) {
     fclose(f);
 
     printf("klangc: compiled '%s' -> '%s'\n", in_path, out_path);
+
+    /* A program with `js fn` declarations needs its JavaScript half alongside the
+       C, and needs emcc to be told about it — so say the whole command rather
+       than leaving it to be discovered. */
+    if (g_js_count > 0) {
+        sb_append(&g_js_lib, "});\n");
+        size_t n = strlen(out_path);
+        const char *dot = strrchr(out_path, '.');
+        size_t base = dot ? (size_t)(dot - out_path) : n;
+        char *js_path = malloc(base + 8);
+        memcpy(js_path, out_path, base);
+        strcpy(js_path + base, ".lib.js");
+        FILE *jf = fopen(js_path, "wb");
+        if (!jf) { fprintf(stderr, "klangc: cannot write '%s'\n", js_path); return 1; }
+        fwrite(g_js_lib.data, 1, (size_t)g_js_lib.len, jf);
+        fclose(jf);
+        printf("klangc: %d 'js fn' declaration(s) -> '%s'\n", g_js_count, js_path);
+        printf("klangc: build with  emcc %s --js-library %s -o page.js -sALLOW_MEMORY_GROWTH\n",
+               out_path, js_path);
+    }
+
     if (g_c_links.count || g_uses_threads) {
         printf("klangc: link with");
         for (int i = 0; i < g_c_links.count; i++)

@@ -1,0 +1,4 @@
+js fn draw(points: [int]) {
+    console.log(points)
+}
+fn main() { unsafe { draw([1]) } }

@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.14 — Phase 13 complete
+## Status: v0.15 — Phase 14 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -83,14 +83,16 @@ aspirational.
   precise collector was for: WASM locals are not addressable memory, so the old
   conservative scan found nothing there and freed live objects. See
   [docs/WASM.md](docs/WASM.md) for the before/after measurements.
+- **Frontend** — `js fn` declares a function whose body is JavaScript and lets the
+  compiler marshal the boundary; `export fn` makes a Klang function callable from
+  JavaScript; module-level `let mut` holds the state an event handler needs.
+  [std/dom](std/dom.kkg) builds a safe API on top, and
+  [examples/web.kkg](examples/web.kkg) is a whole page — state, rendering, events —
+  with no JavaScript in it. `make test-web` drives it headlessly under Node.
 
-**Frontend is not possible yet**, but the reason has changed. The collector works on
-WASM now; what is missing is a way to call JavaScript — importing and exporting JS
-functions is a language feature, not a library, and it is the next piece of work.
-Threads on the web additionally need `SharedArrayBuffer` and cross-origin isolation.
+Still missing: threads on the web (they need `SharedArrayBuffer` and cross-origin
+isolation), traits, and all tooling (REPL, formatter, linter, package manager).
 `std/net` is POSIX only; Windows needs the Winsock variant.
-
-Also not yet: traits, and all tooling (REPL, formatter, linter, package manager).
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
@@ -167,7 +169,25 @@ fn wordCount(text: string) -> {string: int} {
 }
 ```
 
-See [examples/phase1.kkg](examples/phase1.kkg),
+```kkg
+// The browser. `js fn` bodies are JavaScript; the compiler marshals the boundary,
+// std/dom wraps it safely, and `export fn` is what an event handler can name.
+import "std/dom"
+
+let mut clicks = 0
+
+export fn onClick() {
+    clicks += 1
+    dom.setText("#count", "${clicks} clicks")
+}
+
+fn main() {
+    dom.on("#button", "click", "onClick")
+}
+```
+
+See [examples/web.kkg](examples/web.kkg),
+[examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase2.kkg](examples/phase2.kkg),
 [examples/modules.kkg](examples/modules.kkg),
 [examples/phase5.kkg](examples/phase5.kkg),

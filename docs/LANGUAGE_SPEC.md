@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.14)
+# Klang Language Spec (v0.15)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -557,6 +557,87 @@ One thing to know: a `string` handed to C points into the collected heap. It sta
 alive for the duration of the call, but if C stores the pointer for later, keep a
 Klang reference alive too.
 
+## Calling JavaScript, and the browser
+
+Klang compiles to WebAssembly, and WebAssembly on its own cannot touch a page. So
+JavaScript is reachable the same way C is: declare it, and the compiler builds the
+bridge. `js fn` is a function whose body is JavaScript rather than Klang.
+
+```kkg
+js fn setTitle(text: string) {
+    document.title = text
+}
+
+js fn readNumber(sel: string) -> float {
+    return Number(document.querySelector(sel).value)
+}
+```
+
+The body is taken verbatim — it is not Klang, and the Klang lexer never looks at
+it — so it is ordinary JavaScript, semicolons optional, comments and template
+literals included. Nothing in it mentions pointers or `UTF8ToString`: the compiler
+marshals both directions.
+
+**Only `int`, `float`, `bool` and `string` cross.** An array, map, struct or enum
+is a Klang heap object that means nothing on the other side, and the compiler says
+so rather than marshalling something half-way. Numbers cross as JavaScript numbers,
+which are float64, so an `int` outside ±2^53 stops with a message rather than
+quietly rounding — the same standard the rest of Klang's arithmetic holds itself to.
+Strings are copied, and the copy belongs to the collector.
+
+**Calling a `js fn` is `unsafe`**, exactly as calling C is, and for the same reason:
+Klang cannot check what happens on the other side. [std/dom](../std/dom.kkg) does
+that unsafe work once and exports a safe API, so a page written against `std/dom`
+contains no `unsafe` at all.
+
+Going the other way, `export fn` makes a Klang function callable from JavaScript
+under its own name:
+
+```kkg
+export fn remaining() -> int {
+    return list.count(tasks, |t| !t.done)
+}
+```
+
+JavaScript reaches it as `Module._remaining()`. The same four types apply, for the
+same reason. A string argument or result crosses as a pointer, so a JavaScript
+caller uses `Module.ccall("name", "string", ["string"], [...])`.
+
+An event handler cannot be a Klang closure — the closure lives in Klang's heap and
+JavaScript has no way to keep it alive — so `dom.on` names an `export fn` instead:
+
+```kkg
+dom.on("#add", "click", "addTask")
+```
+
+### Module-level state
+
+A page is event-driven: a handler runs long after `main` returned and cannot capture
+a local. So state lives at module level. `const` is a value that never changes;
+`let mut` is one that does.
+
+```kkg
+let mut tasks: [Task] = []
+const PORT = 8080
+```
+
+A module-level `let` without `mut` is rejected, because it would say nothing `const`
+does not.
+
+### Building
+
+`klangc` writes two files when a program uses `js fn`: the C, and a `.lib.js`
+holding the JavaScript half. It prints the `emcc` command that joins them.
+
+```sh
+klangc examples/web.kkg -o web.c
+emcc -O2 web.c --js-library web.lib.js -o page.js -sALLOW_MEMORY_GROWTH
+```
+
+[examples/web.kkg](../examples/web.kkg) is a complete page — state, rendering,
+events — with no JavaScript in it. `make test-web` builds it and drives it under
+Node against a stub DOM, so the claim is tested rather than asserted.
+
 ## The collector
 
 Klang ships its own garbage collector — not a dependency — because the runtime is
@@ -687,7 +768,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.14, Phase 13 complete)
+## Implemented today (v0.15, Phase 14 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -719,6 +800,19 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 14 additions — the browser**
+- **`js fn`** — a function whose body is JavaScript, taken verbatim. The compiler
+  marshals arguments and results, so no Klang source mentions a heap pointer.
+- Only int, float, bool and string cross, and ints are checked for exactness rather
+  than rounded into a float64. Calling one is `unsafe`, as calling C is.
+- **`export fn`** — a Klang function JavaScript can call as `Module._name`
+- **Module-level `let mut`** — state that outlives main, which an event handler needs
+- **`std/dom`** — selectors, text, HTML, attributes, classes, events, escaping;
+  written on top of `js fn`, and safe to use without `unsafe`
+- `klangc` emits a companion `.lib.js` and prints the emcc command that joins them
+- **[examples/web.kkg](../examples/web.kkg)** — a complete page with no JavaScript
+  in it, tested headlessly under Node with a stub DOM by `make test-web`
 
 **Phase 13 additions — a precise collector, and WASM that actually works**
 - The collector no longer guesses at roots. Generated code declares a frame of root

@@ -33,6 +33,16 @@ test-gc: bin/klangc
 	@echo "=== gc: precise roots only, collecting at every allocation ==="
 	@$(CC) $(CFLAGS) -DK_PRECISE_ONLY=1 -DK_GC_STRESS=1 -o /tmp/klang_gcs /tmp/klang_gcs.c $(LDLIBS) && /tmp/klang_gcs
 
+# The browser example, driven headlessly. Needs emcc and node, so it is not part
+# of `check` — but when they are present there is no excuse for not running it.
+.PHONY: test-web
+test-web: bin/klangc
+	@command -v emcc >/dev/null || { echo "skipping test-web: emcc not installed"; exit 0; }
+	@./bin/klangc examples/web.kkg -o examples/web/web.c >/dev/null
+	@emcc -O2 examples/web/web.c --js-library examples/web/web.lib.js \
+		-o examples/web/page.js -sALLOW_MEMORY_GROWTH -sEXPORTED_RUNTIME_METHODS=ccall
+	@node tests/web_test.js "$$PWD/examples/web/page.js"
+
 # Every file here must be rejected, with a useful message.
 .PHONY: test-errors
 test-errors: bin/klangc

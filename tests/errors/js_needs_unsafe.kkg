@@ -1,0 +1,4 @@
+js fn log(text: string) {
+    console.log(text)
+}
+fn main() { log("hi") }

@@ -1,0 +1,2 @@
+js fn log(text: string)
+fn main() {}

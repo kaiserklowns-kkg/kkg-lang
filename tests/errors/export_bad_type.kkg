@@ -1,0 +1,2 @@
+export fn total(xs: [int]) -> int { return xs.len() }
+fn main() {}

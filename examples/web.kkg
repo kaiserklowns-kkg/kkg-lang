@@ -1,0 +1,101 @@
+// A web page, in Klang.
+//
+// The whole thing — state, logic, rendering, event handling — is this file.
+// There is no JavaScript in it, because std/dom did that part once.
+//
+//   klangc examples/web.kkg -o examples/web/web.c
+//   emcc -O2 examples/web/web.c -o examples/web/web.js -sALLOW_MEMORY_GROWTH
+//   (serve examples/web/ over http and open index.html)
+
+import "std/dom"
+import "std/list"
+import "std/string" as str
+
+struct Task {
+    title: string,
+    done: bool,
+}
+
+// Module-level state. An event handler runs long after main returned and cannot
+// capture a local, so the page's state has to live here. `let mut` says it
+// changes; `const` would say it does not.
+let mut tasks: [Task] = []
+let mut message = ""
+
+fn row(t: Task) -> string {
+    if t.done {
+        return "<li class=\"done\">☑ ${dom.escape(t.title)}</li>"
+    }
+    return "<li class=\"todo\">☐ ${dom.escape(t.title)}</li>"
+}
+
+fn render() {
+    if tasks.len() == 0 {
+        dom.setHtml("#list", "<li class=\"empty\">nothing yet</li>")
+    } else {
+        dom.setHtml("#list", list.map(tasks, row).join(""))
+    }
+    let left = list.count(tasks, |t| !t.done)
+    dom.setText("#count", "${left} of ${tasks.len()} left")
+    dom.setText("#message", message)
+}
+
+// Exported functions are the ones JavaScript can call. They are ordinary Klang;
+// the only rule is that their arguments and results must be types JavaScript
+// understands, which the compiler enforces.
+
+export fn addTask() {
+    let title = str.trim(dom.value("#entry"))
+    if title == "" {
+        message = "type something first"
+        render()
+        return
+    }
+    push(tasks, Task { title: title, done: false })
+    message = ""
+    dom.setValue("#entry", "")
+    render()
+}
+
+export fn completeFirst() {
+    let mut i = 0
+    while i < tasks.len() {
+        if !tasks[i].done {
+            tasks[i] = Task { title: tasks[i].title, done: true }
+            message = ""
+            render()
+            return
+        }
+        i += 1
+    }
+    message = "everything is done"
+    render()
+}
+
+export fn clearDone() {
+    let before = tasks.len()
+    // Assigning to module state rebinds it, which is how a list shrinks.
+    tasks = list.filter(tasks, |t| !t.done)
+    message = "cleared ${before - tasks.len()}"
+    render()
+}
+
+// A value going back to JavaScript, so the host page can read Klang's state.
+export fn remaining() -> int {
+    return list.count(tasks, |t| !t.done)
+}
+
+// `main` runs once when the page loads: it wires the buttons and draws the first
+// frame. Everything after that happens in the exported functions above.
+fn main() {
+    push(tasks, Task { title: "write a language", done: true })
+    push(tasks, Task { title: "give it a garbage collector", done: true })
+    push(tasks, Task { title: "make it run in a browser", done: false })
+
+    dom.on("#add", "click", "addTask")
+    dom.on("#complete", "click", "completeFirst")
+    dom.on("#clear", "click", "clearDone")
+
+    render()
+    dom.log("klang: page ready")
+}

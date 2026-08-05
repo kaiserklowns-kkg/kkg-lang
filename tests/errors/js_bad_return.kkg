@@ -1,0 +1,5 @@
+struct P { x: int }
+js fn make() -> P {
+    return {x: 1}
+}
+fn main() { unsafe { make() } }

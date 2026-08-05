@@ -72,12 +72,23 @@ Rooting is within noise. The 120k-allocation regression test:
 | conservative | 104 ms |
 | precise | 107 ms |
 
-## Still missing for frontend
+## Reaching the page
 
-A WASM binary is not yet a web page:
+A WASM binary cannot touch the DOM on its own, so Klang gained a way to call
+JavaScript — `js fn` and `export fn`, described under
+[Calling JavaScript](LANGUAGE_SPEC.md#calling-javascript-and-the-browser).
 
-- **DOM access**, which means importing and exporting JavaScript functions — a
-  language feature, not a library. This is the next piece of work.
+One decision worth recording, because the obvious approach does not work.
+Emscripten's `EM_JS` puts the JavaScript inline in the C, which would keep klangc
+emitting a single file. But `EM_JS` stringifies the body through the C preprocessor,
+and stringification collapses all whitespace — so a body written in ordinary
+semicolon-free JavaScript arrives as one line and becomes a syntax error inside
+generated code, which is a terrible thing to hand back to someone. klangc therefore
+writes a companion `--js-library` file, where the author's text survives verbatim,
+and prints the `emcc` command that joins the two.
+
+## Still missing
+
 - **Threads** need `-pthread` and, in a browser, `SharedArrayBuffer` with cross-origin
   isolation. `spawn` would map onto Web Workers or be unavailable.
 - `std/net` and `std/fs` cannot work in a browser at all; they are POSIX.
