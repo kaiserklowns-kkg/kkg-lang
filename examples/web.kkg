@@ -1,11 +1,14 @@
-// A real web application, in Klang. No JavaScript in this file.
+// A web application written entirely in Klang.
 //
-// Form submission, event delegation over a list, hash routing, and state that
-// survives a reload — the things an actual page needs, rather than a counter.
+// The page is built here as values, not as strings and not in an .html file:
+// index.html is a six-line shell with an empty <div id="app">. Everything you see
+// — the heading, the form, the filters, the list, the buttons and every handler —
+// is below.
 //
 //     klangc web run examples/web.kkg
 
 import "std/dom"
+import "std/html"
 import "std/fetch"
 import "std/list"
 import "std/json"
@@ -18,13 +21,108 @@ struct Task {
 }
 
 // A handler runs long after main returned and cannot capture a local, so the
-// page's state lives at module level. `let mut` says it changes; `const` would
-// say it does not.
+// page's state lives at module level. `let mut` says it changes.
 let mut tasks: [Task] = []
 let mut nextId = 1
 let mut filter = "all"
+let mut message = ""
 
 const STORE_KEY = "klang.tasks"
+
+// ── the page ──────────────────────────────────────────────────────────
+//
+// `html.on(event, "handlerName")` attaches the handler where the element is
+// built, so nothing here needs an id in order to be clickable, and there is no
+// second list of wiring in main to keep in step.
+
+fn taskRow(t: Task) -> html.Node {
+    let mark = if t.done { "☑" } else { "☐" }
+    return html.li([html.class(if t.done { "task done" } else { "task" })], [
+        html.button([html.class("toggle"), html.title("toggle"),
+                     html.on("click", "toggleTask"), html.arg("${t.id}")],
+                    [html.text(mark)]),
+        // A text node is escaped when it is rendered. There is no way to forget.
+        html.span([], [html.text(t.title)]),
+        html.button([html.class("delete"), html.title("delete"),
+                     html.on("click", "deleteTask"), html.arg("${t.id}")],
+                    [html.text("×")]),
+    ])
+}
+
+fn visible() -> [Task] {
+    if filter == "done" {
+        return list.filter(tasks, |t| t.done)
+    }
+    if filter == "todo" {
+        return list.filter(tasks, |t| !t.done)
+    }
+    return tasks
+}
+
+fn listView() -> html.Node {
+    let shown = visible()
+    if shown.len() == 0 {
+        return html.ul([html.id("list")], [
+            html.li([html.class("empty")], [html.text("nothing here")]),
+        ])
+    }
+    return html.ul([html.id("list")], list.map(shown, taskRow))
+}
+
+fn filterLink(nameOf: string, label: string, target: string) -> html.Node {
+    let cls = if filter == nameOf { "on" } else { "" }
+    return html.a([html.href(target), html.class(cls)], [html.text(label)])
+}
+
+fn statusView() -> html.Node {
+    let left = list.count(tasks, |t| !t.done)
+    return html.div([html.id("status"), html.class("status")], [
+        html.span([], [html.text("${left} of ${tasks.len()} left")]),
+        html.span([html.class("message")], [html.text(message)]),
+        html.span([], [
+            html.button([html.on("click", "sync")], [html.text("sync")]),
+            html.button([html.on("click", "clearDone")], [html.text("clear done")]),
+        ]),
+    ])
+}
+
+// The parts that do not change while you use the page. It is mounted once,
+// because re-mounting an <input> would throw away what is being typed into it —
+// Klang has no diffing DOM, so the split is explicit rather than hidden.
+fn shell() -> html.Node {
+    return html.div([], [
+        html.h1([], [html.text("Klang in the browser")]),
+        html.p([html.class("sub")], [
+            html.text("This whole page is "),
+            html.a([html.href("../web.kkg")], [html.text("examples/web.kkg")]),
+            html.text(" — built as Klang values, compiled to WebAssembly. "),
+            html.text("There is no HTML file behind it beyond an empty div."),
+        ]),
+        html.form([html.on("submit", "addTask")], [
+            html.label([html.class("sr-only")], [html.text("Task")]),
+            html.input([html.id("entry"), html.placeholder("something to do — esc to clear"),
+                        html.attr("autocomplete", "off")]),
+            html.button([html.type_("submit")], [html.text("add")]),
+        ]),
+        html.nav([html.id("filters")], []),
+        html.div([html.id("listbox")], []),
+        html.div([html.id("statusbox")], []),
+    ])
+}
+
+// Everything that changes is re-rendered from the state, which is the only copy.
+fn render() {
+    dom.mountAll("#filters", [
+        filterLink("all", "all", "#"),
+        filterLink("todo", "todo", "#todo"),
+        filterLink("done", "done", "#done"),
+    ])
+    dom.mount("#listbox", listView())
+    dom.mount("#statusbox", statusView())
+
+    let left = list.count(tasks, |t| !t.done)
+    dom.setTitle(if left == 0 { "Klang — all done" } else { "Klang — ${left} left" })
+}
 
 // ── persistence ───────────────────────────────────────────────────────
 //
@@ -66,7 +164,6 @@ fn fieldBool(doc: json.Json, key: string) -> bool {
 fn load() {
     let saved = dom.stored(STORE_KEY)
     if saved == "" {
-        // First visit: something to look at rather than an empty box.
         push(tasks, Task { id: 1, title: "write a language", done: true })
         push(tasks, Task { id: 2, title: "give it a garbage collector", done: true })
         push(tasks, Task { id: 3, title: "make it run in a browser", done: false })
@@ -90,51 +187,6 @@ fn save() {
     dom.store(STORE_KEY, toJson())
 }
 
-// ── rendering ─────────────────────────────────────────────────────────
-
-fn visible() -> [Task] {
-    if filter == "done" {
-        return list.filter(tasks, |t| t.done)
-    }
-    if filter == "todo" {
-        return list.filter(tasks, |t| !t.done)
-    }
-    return tasks
-}
-
-fn row(t: Task) -> string {
-    let cls = if t.done { "task done" } else { "task" }
-    let mark = if t.done { "☑" } else { "☐" }
-    // Every piece of user text is escaped. Forgetting that is the oldest bug on
-    // the web, so std/dom provides it and this line always uses it.
-    return "<li class=\"${cls}\">"
-         + "<button class=\"toggle\" data-id=\"${t.id}\" title=\"toggle\">${mark}</button>"
-         + "<span>${dom.escape(t.title)}</span>"
-         + "<button class=\"delete\" data-id=\"${t.id}\" title=\"delete\">×</button>"
-         + "</li>"
-}
-
-fn render() {
-    let shown = visible()
-    if shown.len() == 0 {
-        dom.setHtml("#list", "<li class=\"empty\">nothing here</li>")
-    } else {
-        dom.setHtml("#list", str.join(list.map(shown, row), ""))
-    }
-
-    let left = list.count(tasks, |t| !t.done)
-    dom.setText("#count", "${left} of ${tasks.len()} left")
-    dom.setTitle(if left == 0 { "Klang — all done" } else { "Klang — ${left} left" })
-
-    for name in ["all", "todo", "done"] {
-        if name == filter {
-            dom.addClass("#f-${name}", "on")
-        } else {
-            dom.removeClass("#f-${name}", "on")
-        }
-    }
-}
-
 fn indexOfId(id: int) -> int {
     for i in 0..tasks.len() {
         if tasks[i].id == id {
@@ -144,32 +196,39 @@ fn indexOfId(id: int) -> int {
     return -1
 }
 
-// ── the handlers JavaScript can reach ─────────────────────────────────
+fn parseId(text: string) -> int {
+    return match str.parseInt(text) {
+        Ok(n)  => n,
+        Err(_) => -1,
+    }
+}
+
+// ── the handlers the page names ───────────────────────────────────────
 //
-// An `export fn` is a plain symbol JavaScript calls by name. Its arguments and
-// result have to be types JavaScript understands, and the compiler holds you to
-// that — an array or a struct is refused rather than half-marshalled.
+// An `export fn` is a plain symbol JavaScript calls. Its arguments and result
+// have to be types JavaScript understands, and the compiler holds you to that.
 
 export fn addTask() {
     let title = str.trim(dom.value("#entry"))
     if title == "" {
-        dom.setText("#message", "type something first")
+        message = "type something first"
+        render()
         return
     }
     push(tasks, Task { id: nextId, title: title, done: false })
     nextId += 1
+    message = ""
     dom.setValue("#entry", "")
-    dom.setText("#message", "")
     dom.focus("#entry")
     save()
     render()
 }
 
-// Delegated: one listener on the list, told which row was hit.
 export fn toggleTask(idText: string) {
     let i = indexOfId(parseId(idText))
     if i >= 0 {
         tasks[i] = Task { id: tasks[i].id, title: tasks[i].title, done: !tasks[i].done }
+        message = ""
         save()
         render()
     }
@@ -187,8 +246,8 @@ export fn deleteTask(idText: string) {
 export fn clearDone() {
     let before = tasks.len()
     tasks = list.filter(tasks, |t| !t.done)
-    dom.setText("#message", if before == tasks.len() { "nothing to clear" }
-                            else { "cleared ${before - tasks.len()}" })
+    message = if before == tasks.len() { "nothing to clear" }
+              else { "cleared ${before - tasks.len()}" }
     save()
     render()
 }
@@ -197,7 +256,8 @@ export fn clearDone() {
 export fn onKey(key: string) {
     if key == "Escape" {
         dom.setValue("#entry", "")
-        dom.setText("#message", "")
+        message = ""
+        render()
     }
 }
 
@@ -208,28 +268,24 @@ export fn onRoute() {
 }
 
 // ── talking to a server ───────────────────────────────────────────────
-//
-// The reply comes back to an export, because a round trip outlives the call that
-// started it. Both outcomes are handled: there is no path where a failed request
-// quietly leaves the page as it was.
 
 export fn sync() {
-    dom.setText("#message", "syncing…")
+    message = "syncing…"
+    render()
     fetch.post("/api/tasks", toJson(), "syncDone", "syncFailed")
 }
 
 export fn syncDone(body: string) {
-    match json.parse(body) {
-        Err(e) => dom.setText("#message", "server sent something odd: ${e}")
-        Ok(doc) => {
-            let n = fieldInt(doc, "saved")
-            dom.setText("#message", "synced ${n}")
-        }
+    message = match json.parse(body) {
+        Err(e)  => "server sent something odd: ${e}",
+        Ok(doc) => "synced ${fieldInt(doc, "saved")}",
     }
+    render()
 }
 
 export fn syncFailed(why: string) {
-    dom.setText("#message", "sync failed: ${why}")
+    message = "sync failed: ${why}"
+    render()
 }
 
 // Readable from JavaScript, so the host page can ask Klang how it is doing.
@@ -237,22 +293,15 @@ export fn remaining() -> int {
     return list.count(tasks, |t| !t.done)
 }
 
-fn parseId(text: string) -> int {
-    return match str.parseInt(text) {
-        Ok(n)  => n,
-        Err(_) => -1,
-    }
-}
-
 fn main() {
     load()
 
-    dom.onSubmit("#form", "addTask")
+    dom.mount("#app", shell())
+    // One listener each, on the container. Everything mounted later is covered,
+    // because the listener is not on the elements.
+    dom.delegate("#app", "click")
+    dom.delegate("#app", "submit")
     dom.onKey("#entry", "keydown", "onKey")
-    dom.onChild("#list", "click", ".toggle", "toggleTask")
-    dom.onChild("#list", "click", ".delete", "deleteTask")
-    dom.on("#clear", "click", "clearDone")
-    dom.on("#sync", "click", "sync")
     dom.onHashChange("onRoute")
 
     onRoute()

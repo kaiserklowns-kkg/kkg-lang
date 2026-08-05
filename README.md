@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.20 — Phase 19 complete
+## Status: v0.21 — Phase 20 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -77,7 +77,8 @@ aspirational.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
-  [std/http](std/http.kkg), [std/json](std/json.kkg).
+  [std/http](std/http.kkg), [std/json](std/json.kkg), [std/html](std/html.kkg),
+  [std/dom](std/dom.kkg), [std/fetch](std/fetch.kkg).
 - **WASM** — Klang compiles to WASM and runs there correctly. Every example passes
   under Node except the two that need POSIX sockets or threads. This is what the
   precise collector was for: WASM locals are not addressable memory, so the old
@@ -85,17 +86,23 @@ aspirational.
   [docs/WASM.md](docs/WASM.md) for the before/after measurements.
 - **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces
   hold one expression and `else` is required, so braces keep meaning one thing.
+- **The page is Klang** — [std/html](std/html.kkg) makes markup a value, so
+  escaping is structural (a `text` node cannot inject a tag, and `raw` has to be
+  typed on purpose) and a handler is attached where the element is built:
+  `html.on("click", "addTask")` needs no id and no wiring elsewhere.
+  `dom.mount` puts a tree on the page and `dom.delegate` installs one listener
+  that covers everything mounted later. `index.html` holds a `<div id="app">` and
+  no application markup at all.
 - **Frontend** — `js fn` declares a function whose body is JavaScript and lets the
   compiler marshal the boundary; `export fn` makes a Klang function callable from
   JavaScript; module-level `let mut` holds the state an event handler needs.
-  [std/dom](std/dom.kkg) is a real DOM library on top of that — text, HTML,
-  attributes, classes, `onValue` / `onKey` / `onChild` / `onSubmit`, hash routing,
-  localStorage, timers, and escaping that the library does so you cannot forget.
-  [std/fetch](std/fetch.kkg) is HTTP, with the reply arriving at an export and
-  every call naming an error handler. [examples/web.kkg](examples/web.kkg) is a
-  working application — a form, event delegation over a list, routing, state
-  persisted as JSON, and a sync that posts it — with no JavaScript in it, and
-  `make test-web` drives all of it against a stub DOM and a stub server.
+  [std/dom](std/dom.kkg) covers text, HTML, attributes, classes, events, hash
+  routing, localStorage and timers; [std/fetch](std/fetch.kkg) is HTTP, with the
+  reply arriving at an export and every call naming an error handler.
+  [examples/web.kkg](examples/web.kkg) is a working application — a form, event
+  delegation over a list, routing, state persisted as JSON, and a sync that posts
+  it — written entirely in Klang, and `make test-web` drives all of it against a
+  stub DOM and a stub server.
 - **Stylesheets** — plain CSS is a static file and always worked. Tailwind is
   first-class: `klangc new --css tailwind` scaffolds it and `klangc web run`
   compiles it, with `@source` pointed at `src/**/*.kkg` so the class names Klang

@@ -71,10 +71,13 @@ li button:hover { opacity: 1; }
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: .5rem;
   font-size: .85rem;
   opacity: .75;
   margin-top: .8rem;
 }
+.status .message { flex: 1; text-align: center; }
+.status button { padding: .3rem .6rem; }
 
 .sr-only {
   position: absolute;

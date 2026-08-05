@@ -76,27 +76,26 @@ if [ -z "$JS" ]; then
   exit 0
 fi
 
-cat > drive.js <<'EOF'
-// The scaffolded page, driven against a stub DOM: does the button count?
-class El {
-  constructor() { this.textContent = ""; this.listeners = {}; }
-  addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); }
-  fire(ev) { for (const fn of this.listeners[ev] || []) fn(); }
-}
-const els = { "#button": new El(), "#count": new El() };
-globalThis.document = { querySelector: (s) => els[s] ?? null };
+cat > drive.js <<EOF
+// The scaffolded page, driven against the shared stub DOM: the markup is built by
+// Klang, so this also checks that std/html and delegation work in the template
+// everyone starts from.
+const { install } = require("$HERE/tests/stub_dom.js");
+const { app, q, byText } = install();
 const Module = require(process.argv[2]);
 setTimeout(() => {
   const want = (got, exp, what) => {
-    if (got !== exp) { console.log(`  FAIL ${what}: ${JSON.stringify(got)} != ${JSON.stringify(exp)}`); process.exit(1); }
+    if (got !== exp) {
+      console.log(\`  FAIL \${what}: \${JSON.stringify(got)} != \${JSON.stringify(exp)}\`);
+      process.exit(1);
+    }
   };
-  want(els["#count"].textContent, "0 clicks", "first render");
-  els["#button"].fire("click");
-  els["#button"].fire("click");
-  want(els["#count"].textContent, "2 clicks", "after two clicks");
-  console.log("  web     runs, and the button counts");
+  want(q("h1") !== null, true, "the heading was built by Klang");
+  want(q("#count").textContent, "0 clicks", "first render");
+  app.fire("click", byText("button", "click me"));
+  app.fire("click", byText("button", "click me"));
+  want(q("#count").textContent, "2 clicks", "after two clicks, via delegation");
+  console.log("  web     runs, its markup is Klang, and the button counts");
 }, 200);
 EOF
 "$JS" drive.js "$WORK/demo-web/web/app.js"
-
-cd "$HERE"

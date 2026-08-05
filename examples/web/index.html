@@ -4,34 +4,9 @@
 <title>Klang in the browser</title>
 <link rel="stylesheet" href="style.css">
 
-<h1>Klang in the browser</h1>
-<p class="sub">
-  State, rendering, routing, storage, the network and every event handler are
-  <a href="../web.kkg">examples/web.kkg</a>, compiled to WebAssembly. This page
-  contains no application JavaScript.
-</p>
-
-<form id="form">
-  <label class="sr-only" for="entry">Task</label>
-  <input id="entry" placeholder="something to do — esc to clear" autocomplete="off">
-  <button type="submit">add</button>
-</form>
-
-<nav>
-  <a id="f-all" href="#">all</a>
-  <a id="f-todo" href="#todo">todo</a>
-  <a id="f-done" href="#done">done</a>
-</nav>
-
-<ul id="list"><li class="empty">loading…</li></ul>
-
-<div class="status">
-  <span id="count"></span>
-  <span id="message"></span>
-  <span>
-    <button id="sync">sync</button>
-    <button id="clear">clear done</button>
-  </span>
-</div>
+<!-- Everything inside #app is built by ../web.kkg as Klang values. This file
+     exists to declare the charset, the stylesheet and the script; there is no
+     application markup in it. -->
+<div id="app"></div>
 
 <script src="app.js"></script>

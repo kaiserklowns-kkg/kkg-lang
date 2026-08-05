@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.20)
+# Klang Language Spec (v0.21)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -649,6 +649,52 @@ in. `Module.ccall` allocates it on the stack and releases it the moment the call
 returns, so a handler that stored the pointer would be holding freed memory —
 which it is not, because the boundary copies.
 
+### The page itself
+
+Markup is Klang values, not strings and not an `.html` file:
+
+```kkg
+import "std/dom"
+import "std/html"
+
+fn taskRow(t: Task) -> html.Node {
+    return html.li([html.class(if t.done { "done" } else { "" })], [
+        html.button([html.on("click", "toggleTask"), html.arg("${t.id}")],
+                    [html.text(if t.done { "☑" } else { "☐" })]),
+        html.span([], [html.text(t.title)]),
+    ])
+}
+
+fn render() {
+    dom.mount("#app", html.ul([], list.map(tasks, taskRow)))
+}
+```
+
+Three things follow from a page being a value.
+
+**Escaping is structural.** A `text` node is escaped when it is rendered, so there
+is no way to forget — and `t.title` above cannot inject markup no matter what is
+in it. The only route to unescaped output is `html.raw`, which has to be typed on
+purpose. Attribute values are escaped the same way.
+
+**A handler is attached where the element is built.** `html.on("click", "toggleTask")`
+becomes a `data-on-click` attribute, and `dom.delegate("#app", "click")` installs
+one listener that reads it and calls that `export fn` — passing `html.arg(v)` when
+there is one. So a button needs no id, no selector, and no matching line elsewhere
+in `main`. One listener covers everything mounted later, because it is on the
+container rather than on the elements.
+
+**`index.html` holds no application markup.** It declares the charset, the
+stylesheet and the script, and an empty `<div id="app">`. `klangc new` writes that
+shell, and `klangc web run` generates one if a project has none, so a page can be
+written without touching HTML at all.
+
+What Klang does not have is a diffing DOM. Re-mounting a subtree replaces it, which
+would throw away what is being typed into an `<input>`, so the static chrome is
+mounted once and the parts that change are re-mounted from the state. That split is
+explicit in [examples/web.kkg](../examples/web.kkg) rather than hidden behind a
+framework.
+
 ### Stylesheets
 
 A `.css` file needs nothing from Klang. It is a static file, the dev server sends
@@ -934,7 +980,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.20, Phase 19 complete)
+## Implemented today (v0.21, Phase 20 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -966,6 +1012,22 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 20 additions — the page is Klang too**
+- **`std/html`** — markup as values. `Node` / `Element` / `Attr`, the tags worth
+  having by name, void elements that take no children, and `render` that escapes
+  text and attribute values structurally. `raw` is the only way out, and it has to
+  be typed on purpose.
+- **`html.on(event, "handler")` and `html.arg(v)`** — the handler travels with the
+  element, so a button needs no id and no wiring elsewhere
+- **`dom.mount` / `dom.mountAll` / `dom.delegate`** — one listener on a container
+  dispatches `data-on-*` to exports, and keeps working for everything mounted later
+- **`index.html` holds no application markup** — a shell with `<div id="app">`.
+  Both scaffolds and the generated fallback page were reduced to that.
+- [examples/web.kkg](../examples/web.kkg) builds its heading, form, filters, list,
+  status bar and buttons in Klang. The test parses the rendered markup into a real
+  tree, so delegation has to find the right ancestor and escaping has to have
+  happened — a `<script>` typed into the box is asserted to arrive as text.
 
 **Phase 19 additions — `klangc build`**
 - **`klangc build`** — a native executable, directly. The C stopped being something

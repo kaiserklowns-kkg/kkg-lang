@@ -13,6 +13,7 @@
 // done with it. A handler is an `export fn`, which is a plain symbol.
 
 import "std/string" as str
+import "std/html"
 
 // ── reading the document ──────────────────────────────────────────────
 
@@ -156,6 +157,26 @@ js fn jsOnSubmit(sel: string, handler: string) {
     })
 }
 
+// One listener for everything std/html built. It looks for `data-on-<event>` on
+// the element or an ancestor, and calls the export it names — passing `data-arg`
+// when there is one. So a button carries its own handler and needs no id, no
+// selector, and no matching line in main.
+js fn jsDelegate(sel: string, event: string) {
+    var root = document.querySelector(sel)
+    if (root === null) return
+    var key = "data-on-" + event
+    root.addEventListener(event, function(ev) {
+        var el = ev.target.closest("[" + key + "]")
+        if (el === null || !root.contains(el)) return
+        // A submit that reloads the page is never what was meant.
+        if (event === "submit") ev.preventDefault()
+        var handler = el.getAttribute(key)
+        var a = el.getAttribute("data-arg")
+        if (a === null) Module["_" + handler]()
+        else Module.ccall(handler, null, ["string"], [a])
+    })
+}
+
 // The address bar is not an element, so it gets its own listener.
 js fn jsOnHash(handler: string) {
     window.addEventListener("hashchange", function() { Module["_" + handler]() })
@@ -263,6 +284,19 @@ pub fn onChild(sel: string, event: string, childSel: string, handler: string) {
 }
 pub fn onSubmit(sel: string, handler: string) { unsafe { jsOnSubmit(sel, handler) } }
 pub fn onHashChange(handler: string) { unsafe { jsOnHash(handler) } }
+
+// ── mounting what std/html built ──────────────────────────────────────
+
+// Replaces the contents of `sel` with a tree of nodes.
+pub fn mount(sel: string, node: html.Node) { setHtml(sel, html.render(node)) }
+
+// The same, for a list of siblings going into a container that already exists.
+pub fn mountAll(sel: string, nodes: [html.Node]) { setHtml(sel, html.renderAll(nodes)) }
+
+// Install one listener under `sel` for every `html.on(event, ...)` inside it.
+// Called once; it keeps working for everything mounted afterwards, because the
+// listener is on the container rather than on the elements.
+pub fn delegate(sel: string, event: string) { unsafe { jsDelegate(sel, event) } }
 
 pub fn after(ms: int, handler: string) -> int { return unsafe { jsAfter(ms, handler) } }
 pub fn every(ms: int, handler: string) -> int { return unsafe { jsEvery(ms, handler) } }
