@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.18)
+# Klang Language Spec (v0.19)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -642,6 +642,45 @@ in. `Module.ccall` allocates it on the stack and releases it the moment the call
 returns, so a handler that stored the pointer would be holding freed memory —
 which it is not, because the boundary copies.
 
+### Stylesheets
+
+A `.css` file needs nothing from Klang. It is a static file, the dev server sends
+it with the right type, and `klangc new` writes one and links it — a file rather
+than a `<style>` block, so that swapping in a real one changes nothing else.
+
+Tailwind is different, because it has to be compiled, and compiling it means
+knowing where the class names are. For Klang most of them are inside string
+literals in `.kkg` files, which is not somewhere Tailwind would look:
+
+```kkg
+let tone = if clicks == 0 { "bg-gray-500/10" } else { "bg-emerald-500/20" }
+dom.setHtml("#count", "<span class=\"rounded-full px-3 py-1 ${tone}\">…</span>")
+```
+
+So the scaffold points it there:
+
+```sh
+klangc new myapp --css tailwind
+```
+
+```css
+/* web/input.css */
+@import "tailwindcss";
+@source "./index.html";
+@source "../src/**/*.kkg";     /* ← the whole trick */
+```
+
+`klangc web run` then compiles `input.css` to `style.css` with the Tailwind CLI —
+installing it first if it is missing, which is why the scaffold also writes a
+`package.json`. `style.css` and `node_modules/` are generated, and the scaffold's
+`.gitignore` says so.
+
+The rule in the compiler is narrow on purpose: **an `input.css` that mentions
+Tailwind gets the Tailwind CLI run over it, and anything else is left alone.**
+Klang is not going to grow opinions about your build tool. Any other pipeline —
+Sass, PostCSS, a bundler — works by writing `style.css` yourself before or
+alongside `klangc web build`; the page is served either way.
+
 ### Talking to a server
 
 [std/fetch](../std/fetch.kkg) is HTTP from the browser, and the reply arrives at
@@ -872,7 +911,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.18, Phase 17 complete)
+## Implemented today (v0.19, Phase 18 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -904,6 +943,18 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 18 additions — stylesheets**
+- Plain CSS always worked, being a static file; the scaffold now writes one and
+  links it rather than inlining a `<style>` block
+- **`klangc new --css tailwind`** — `input.css`, a `package.json`, and a page and
+  a `main.kkg` that use utility classes
+- **`klangc web run` compiles Tailwind**, installing it first if missing. The
+  `@source` lines point it at `src/**/*.kkg`, because Klang builds HTML in string
+  literals and that is where the class names are — verified by a scaffold test
+  that checks a class used only in `.kkg` reaches the stylesheet.
+- Narrow on purpose: an `input.css` mentioning Tailwind gets the Tailwind CLI, and
+  anything else is left alone. Other pipelines work by writing `style.css`.
 
 **Phase 17 additions — enough language to write a page**
 - **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces

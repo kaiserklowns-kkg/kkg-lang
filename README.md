@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.18 — Phase 17 complete
+## Status: v0.19 — Phase 18 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -96,6 +96,11 @@ aspirational.
   working application — a form, event delegation over a list, routing, state
   persisted as JSON, and a sync that posts it — with no JavaScript in it, and
   `make test-web` drives all of it against a stub DOM and a stub server.
+- **Stylesheets** — plain CSS is a static file and always worked. Tailwind is
+  first-class: `klangc new --css tailwind` scaffolds it and `klangc web run`
+  compiles it, with `@source` pointed at `src/**/*.kkg` so the class names Klang
+  writes into string literals are actually found. Any other pipeline works by
+  producing `style.css` itself.
 - **A toolchain, not just a compiler** — `klangc new` writes a project that
   already runs (web, cli or server); `klangc run` compiles, builds and executes a
   native program; `klangc web run` does the same for a page — emcc, a dev server,

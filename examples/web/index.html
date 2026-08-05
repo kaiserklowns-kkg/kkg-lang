@@ -2,41 +2,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Klang in the browser</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.4rem; margin-bottom: .2rem; }
-  p.sub { margin-top: 0; opacity: .7; font-size: .9rem; }
-
-  form { display: flex; gap: .5rem; margin: 1.2rem 0 .8rem; }
-  input { flex: 1; padding: .5rem .7rem; border: 1px solid #8886; border-radius: .4rem;
-          background: transparent; color: inherit; font: inherit; }
-  button { padding: .5rem .9rem; border: 1px solid #8886; border-radius: .4rem;
-           background: transparent; color: inherit; font: inherit; cursor: pointer; }
-  button:hover { background: #8882; }
-
-  nav { display: flex; gap: .4rem; font-size: .85rem; margin-bottom: .8rem; }
-  nav a { padding: .2rem .6rem; border-radius: .3rem; text-decoration: none; color: inherit; opacity: .6; }
-  nav a.on { opacity: 1; background: #8883; }
-
-  ul { list-style: none; padding: 0; margin: 0; border: 1px solid #8884; border-radius: .5rem; }
-  li { display: flex; align-items: center; gap: .6rem; padding: .45rem .6rem;
-       border-bottom: 1px solid #8882; }
-  li:last-child { border-bottom: 0; }
-  li span { flex: 1; }
-  li.done span { opacity: .45; text-decoration: line-through; }
-  li.empty { opacity: .5; font-style: italic; justify-content: center; }
-  li button { border: 0; padding: .15rem .45rem; font-size: 1rem; opacity: .6; }
-  li button:hover { opacity: 1; }
-
-  .status { display: flex; justify-content: space-between; align-items: center;
-            font-size: .85rem; opacity: .75; margin-top: .8rem; }
-  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-</style>
+<link rel="stylesheet" href="style.css">
 
 <h1>Klang in the browser</h1>
 <p class="sub">
-  State, rendering, routing, storage and every event handler are
+  State, rendering, routing, storage, the network and every event handler are
   <a href="../web.kkg">examples/web.kkg</a>, compiled to WebAssembly. This page
   contains no application JavaScript.
 </p>

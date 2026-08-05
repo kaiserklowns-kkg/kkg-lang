@@ -29,8 +29,30 @@ ${CC:-cc} -std=c99 -Wall -Wextra -Werror -O1 -c demo-server/out.c -o /dev/null \
   || fail "the server template's generated C is not warning-clean"
 echo "  server  builds"
 
-# ── web: it has to build, and the button has to work ──────────────────
+# ── the stylesheet is a file, and the page links it ───────────────────
 "$KLANGC" new demo-web > /dev/null
+grep -q 'href="style.css"' demo-web/web/index.html || fail "the page does not link its stylesheet"
+[ -s demo-web/web/style.css ] || fail "no stylesheet was written"
+
+# ── tailwind: the scaffold has to point Tailwind at the Klang source ──
+"$KLANGC" new demo-tw --css tailwind > /dev/null
+grep -q '@import "tailwindcss"' demo-tw/web/input.css || fail "tailwind input.css is not tailwind"
+grep -q 'src/\*\*/\*\.kkg' demo-tw/web/input.css \
+  || fail "tailwind would not see class names written in Klang strings"
+grep -q '"tailwindcss"' demo-tw/package.json || fail "tailwind is not in package.json"
+grep -q 'web/style.css' demo-tw/.gitignore || fail "generated css is not ignored"
+echo "  css     plain and tailwind scaffolded"
+
+# Actually compiling Tailwind means downloading it, so it is opt-in rather than
+# something every `make check` does. KLANG_TEST_TAILWIND=1 turns it on.
+if [ "${KLANG_TEST_TAILWIND:-}" = 1 ] && command -v emcc > /dev/null; then
+  (cd demo-tw && "$KLANGC" web build > /dev/null) || fail "the tailwind project did not build"
+  grep -q "rounded-full" demo-tw/web/style.css \
+    || fail "a class used only in src/main.kkg did not reach the stylesheet"
+  echo "  css     tailwind compiled, and it read the .kkg source"
+fi
+
+# ── web: it has to build, and the button has to work ──────────────────
 if ! command -v emcc > /dev/null; then
   echo "  web     skipped (no emcc)"
   exit 0
