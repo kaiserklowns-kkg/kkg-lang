@@ -6,6 +6,7 @@
 //     klangc web run examples/web.kkg
 
 import "std/dom"
+import "std/fetch"
 import "std/list"
 import "std/json"
 import "std/string" as str
@@ -206,6 +207,31 @@ export fn onRoute() {
     render()
 }
 
+// ── talking to a server ───────────────────────────────────────────────
+//
+// The reply comes back to an export, because a round trip outlives the call that
+// started it. Both outcomes are handled: there is no path where a failed request
+// quietly leaves the page as it was.
+
+export fn sync() {
+    dom.setText("#message", "syncing…")
+    fetch.post("/api/tasks", toJson(), "syncDone", "syncFailed")
+}
+
+export fn syncDone(body: string) {
+    match json.parse(body) {
+        Err(e) => dom.setText("#message", "server sent something odd: ${e}")
+        Ok(doc) => {
+            let n = fieldInt(doc, "saved")
+            dom.setText("#message", "synced ${n}")
+        }
+    }
+}
+
+export fn syncFailed(why: string) {
+    dom.setText("#message", "sync failed: ${why}")
+}
+
 // Readable from JavaScript, so the host page can ask Klang how it is doing.
 export fn remaining() -> int {
     return list.count(tasks, |t| !t.done)
@@ -226,6 +252,7 @@ fn main() {
     dom.onChild("#list", "click", ".toggle", "toggleTask")
     dom.onChild("#list", "click", ".delete", "deleteTask")
     dom.on("#clear", "click", "clearDone")
+    dom.on("#sync", "click", "sync")
     dom.onHashChange("onRoute")
 
     onRoute()

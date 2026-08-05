@@ -642,6 +642,33 @@ in. `Module.ccall` allocates it on the stack and releases it the moment the call
 returns, so a handler that stored the pointer would be holding freed memory —
 which it is not, because the boundary copies.
 
+### Talking to a server
+
+[std/fetch](../std/fetch.kkg) is HTTP from the browser, and the reply arrives at
+an export for the same reason a click does:
+
+```kkg
+export fn gotItems(body: string) { ... }
+export fn itemsFailed(why: string) { ... }
+
+fetch.get("/api/items", "gotItems", "itemsFailed")
+```
+
+Every call names an error handler, and a non-2xx reply is a failure rather than a
+body you might mistake for data — so there is no path where a failed request
+quietly leaves the page as it was.
+
+Why not `let body = fetch.get(url)?`, which would read better and match how the
+rest of Klang handles failure? Because blocking a wasm call on a promise means
+Emscripten's Asyncify, and Asyncify unwinds the shadow stack — which is where
+this collector's root frames live. While a call is suspended those frames point
+at memory the next call will reuse, so a collection triggered by any other
+handler in the meantime would walk garbage and free live objects. A callback
+starts a fresh Klang call with a fresh frame, exactly as a click does, and has no
+such window. A blocking form is possible later, but only once the collector can
+be told to stand down across a suspension — and that is a real piece of work, not
+a flag.
+
 Beyond events, [std/dom](../std/dom.kkg) covers reading and writing text, HTML,
 values, attributes and classes; `localStorage`; the hash and query string, with
 `onHashChange` for routing; `setTimeout` and `setInterval`; and `escape`, because
@@ -888,9 +915,14 @@ locking and the safepoints are only emitted when the program actually contains a
   timers; classes, attributes, focus, counts; `escape` on the way into HTML.
 - String arguments into an `export fn` are copied into the collected heap, because
   `ccall` frees its stack allocation the moment the call returns
+- **`std/fetch`** — GET/POST/PUT/DELETE, with the reply arriving at an `export fn`.
+  Every call names an error handler and a non-2xx reply is a failure, so a request
+  cannot fail quietly.
 - **[examples/web.kkg](../examples/web.kkg)** is now a real application — a form,
-  event delegation over a list, hash routing, and state persisted as JSON through
-  std/json — and `make test-web` drives every one of those against a stub DOM
+  event delegation over a list, hash routing, state persisted as JSON through
+  std/json, and a sync button that posts it — and `make test-web` drives every one
+  of those against a stub DOM and a stub server, including a 503, a thrown
+  request and a reply that is not JSON
 
 **Phase 16 additions — a project, from nothing**
 - **`klangc new <name>`** — a project that already runs. `--kind web` (default),

@@ -74,10 +74,26 @@ class El {
 }
 
 const els = {};
-for (const sel of ["#form", "#entry", "#list", "#count", "#message", "#clear",
+for (const sel of ["#form", "#entry", "#list", "#count", "#message", "#clear", "#sync",
                    "#f-all", "#f-todo", "#f-done"]) {
   els[sel] = new El(sel);
 }
+
+// A stub server, so the network path is exercised rather than assumed. Both
+// outcomes are scripted: `reply` decides what the next request gets.
+let lastRequest = null;
+let reply = { ok: true, status: 200, statusText: "OK", body: '{"saved":3}' };
+globalThis.fetch = (url, init) => {
+  lastRequest = { url, init };
+  if (reply.throws) return Promise.reject(new Error(reply.throws));
+  return Promise.resolve({
+    ok: reply.ok,
+    status: reply.status,
+    statusText: reply.statusText,
+    text: () => Promise.resolve(reply.body),
+  });
+};
+const settle = () => new Promise((r) => setTimeout(r, 20));
 
 const store = new Map();
 globalThis.document = { querySelector: (s) => els[s] ?? null, title: "" };
@@ -128,7 +144,7 @@ const clickRow = (kind, id) => els["#list"].fire("click", rowButton(kind, id));
 
 const Module = require(path);
 
-setTimeout(() => {
+setTimeout(async () => {
   console.log = realLog;
 
   // ── first load: seeded, rendered, titled ────────────────────────────
@@ -208,6 +224,33 @@ setTimeout(() => {
     check("stored shape", typeof parsed[0].id, "number");
   }
 
+  // ── the network, both ways it can go ────────────────────────────────
+  els["#sync"].fire("click");
+  check("says it is working", els["#message"].textContent, "syncing…");
+  check("posted", lastRequest.init.method, "POST");
+  check("to the right place", lastRequest.url, "/api/tasks");
+  check("as json", lastRequest.init.headers["Content-Type"], "application/json");
+  check("body is the task list", JSON.parse(lastRequest.init.body).length, 3);
+  await settle();
+  check("reply reached Klang", els["#message"].textContent, "synced 3");
+
+  reply = { ok: false, status: 503, statusText: "Service Unavailable", body: "" };
+  els["#sync"].fire("click");
+  await settle();
+  check("a bad status is a failure", els["#message"].textContent,
+        "sync failed: 503 Service Unavailable");
+
+  reply = { throws: "network down" };
+  els["#sync"].fire("click");
+  await settle();
+  check("a thrown request is a failure", els["#message"].textContent,
+        "sync failed: network down");
+
+  reply = { ok: true, status: 200, statusText: "OK", body: "not json at all" };
+  els["#sync"].fire("click");
+  await settle();
+  contains("garbage reply is handled", els["#message"].textContent, "server sent something odd");
+
   // ── churn, so a collection certainly runs through the middle ────────
   for (let i = 0; i < 400; i++) {
     type("task number " + i + " with a reasonably long title");
@@ -222,5 +265,5 @@ setTimeout(() => {
     realLog(`web: ${failures} check(s) failed`);
     process.exit(1);
   }
-  realLog("web: form, delegation, routing, storage, keyboard — 403 tasks, all ok");
+  realLog("web: form, delegation, routing, storage, keyboard, network — 403 tasks, all ok");
 }, 200);

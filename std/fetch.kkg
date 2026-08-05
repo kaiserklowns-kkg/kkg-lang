@@ -1,0 +1,69 @@
+// std/fetch — HTTP from a browser.
+//
+// The reply arrives at an `export fn` named by string, the same shape std/dom
+// uses for events, and for the same reason: a Klang closure lives in Klang's
+// heap and JavaScript cannot keep it alive across a network round trip.
+//
+//     export fn gotItems(body: string) { ... }
+//     export fn itemsFailed(why: string) { ... }
+//
+//     fetch.get("/api/items", "gotItems", "itemsFailed")
+//
+// Why not `let body = fetch.get(url)?`, which would read better? Because making a
+// wasm call block on a promise means Emscripten's Asyncify, and Asyncify unwinds
+// the shadow stack — where this collector's root frames live. While a call is
+// suspended those frames point at memory a later call will reuse, so a collection
+// triggered by any other handler in the meantime would walk garbage. A callback
+// starts a fresh Klang call with a fresh frame, exactly like a click does, and has
+// no such window. If Klang ever gets a blocking form, it will be after the
+// collector can be told to stand down across a suspension.
+//
+// Failure is never silent: every call names an error handler, and a non-2xx reply
+// is a failure rather than a body you might mistake for data.
+
+// A single primitive; the shapes below are conveniences over it.
+js fn jsSend(method: string, url: string, body: string, contentType: string,
+             onOk: string, onErr: string) {
+    var init = { method: method }
+    if (method !== "GET" && method !== "HEAD") {
+        init.body = body
+        init.headers = { "Content-Type": contentType }
+    }
+    var fail = function(why) { Module.ccall(onErr, null, ["string"], [String(why)]) }
+    fetch(url, init).then(function(res) {
+        return res.text().then(function(text) {
+            if (!res.ok) {
+                fail(res.status + " " + (res.statusText || "request failed"))
+                return
+            }
+            Module.ccall(onOk, null, ["string"], [text])
+        })
+    }).catch(function(e) {
+        fail(e && e.message ? e.message : e)
+    })
+}
+
+// `onOk` names an `export fn` taking the response body; `onErr` one taking the
+// reason it did not arrive. Both take a single string.
+
+pub fn get(url: string, onOk: string, onErr: string) {
+    unsafe { jsSend("GET", url, "", "", onOk, onErr) }
+}
+
+pub fn post(url: string, body: string, onOk: string, onErr: string) {
+    unsafe { jsSend("POST", url, body, "application/json", onOk, onErr) }
+}
+
+pub fn put(url: string, body: string, onOk: string, onErr: string) {
+    unsafe { jsSend("PUT", url, body, "application/json", onOk, onErr) }
+}
+
+pub fn del(url: string, onOk: string, onErr: string) {
+    unsafe { jsSend("DELETE", url, "", "", onOk, onErr) }
+}
+
+// Everything else: your own method, body and content type.
+pub fn send(method: string, url: string, body: string, contentType: string,
+            onOk: string, onErr: string) {
+    unsafe { jsSend(method, url, body, contentType, onOk, onErr) }
+}

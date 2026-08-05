@@ -91,9 +91,11 @@ aspirational.
   [std/dom](std/dom.kkg) is a real DOM library on top of that — text, HTML,
   attributes, classes, `onValue` / `onKey` / `onChild` / `onSubmit`, hash routing,
   localStorage, timers, and escaping that the library does so you cannot forget.
-  [examples/web.kkg](examples/web.kkg) is a working application — a form, event
-  delegation over a list, routing, and state persisted as JSON — with no
-  JavaScript in it, and `make test-web` drives all of it against a stub DOM.
+  [std/fetch](std/fetch.kkg) is HTTP, with the reply arriving at an export and
+  every call naming an error handler. [examples/web.kkg](examples/web.kkg) is a
+  working application — a form, event delegation over a list, routing, state
+  persisted as JSON, and a sync that posts it — with no JavaScript in it, and
+  `make test-web` drives all of it against a stub DOM and a stub server.
 - **A toolchain, not just a compiler** — `klangc new` writes a project that
   already runs (web, cli or server); `klangc run` compiles, builds and executes a
   native program; `klangc web run` does the same for a page — emcc, a dev server,
