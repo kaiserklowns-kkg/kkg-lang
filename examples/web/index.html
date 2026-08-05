@@ -18,6 +18,7 @@
            background: transparent; color: inherit; font: inherit; cursor: pointer; }
   button:hover { background: #8882; }
   .status { display: flex; justify-content: space-between; font-size: .85rem; opacity: .75; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 
 <h1>Klang in the browser</h1>
@@ -28,6 +29,7 @@
 </p>
 
 <div class="row">
+  <label class="sr-only" for="entry">Task</label>
   <input id="entry" placeholder="something to do" autocomplete="off">
   <button id="add">add</button>
 </div>
@@ -44,4 +46,4 @@
   <button id="clear">clear done</button>
 </div>
 
-<script src="web.js"></script>
+<script src="app.js"></script>

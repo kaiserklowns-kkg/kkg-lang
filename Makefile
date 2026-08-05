@@ -33,15 +33,29 @@ test-gc: bin/klangc
 	@echo "=== gc: precise roots only, collecting at every allocation ==="
 	@$(CC) $(CFLAGS) -DK_PRECISE_ONLY=1 -DK_GC_STRESS=1 -o /tmp/klang_gcs /tmp/klang_gcs.c $(LDLIBS) && /tmp/klang_gcs
 
-# The browser example, driven headlessly. Needs emcc and node, so it is not part
-# of `check` — but when they are present there is no excuse for not running it.
+# `klangc new` claims to produce a project that already runs, so that gets
+# checked. A rotted scaffold is worse than none: it fails on someone's first
+# minute with the language. The web third skips itself without emcc.
+.PHONY: test-new
+test-new: bin/klangc
+	@echo "=== klangc new ==="
+	@sh tests/scaffold_test.sh bin/klangc
+
+# The browser example, driven headlessly. Needs emcc and a JS runtime, so it is
+# not part of `check` — but when they are present there is no excuse for skipping
+# it. Bun and Node both have to work, so whichever is installed gets used, and if
+# both are, both run.
 .PHONY: test-web
 test-web: bin/klangc
 	@command -v emcc >/dev/null || { echo "skipping test-web: emcc not installed"; exit 0; }
-	@./bin/klangc examples/web.kkg -o examples/web/web.c >/dev/null
-	@emcc -O2 examples/web/web.c --js-library examples/web/web.lib.js \
-		-o examples/web/page.js -sALLOW_MEMORY_GROWTH -sEXPORTED_RUNTIME_METHODS=ccall
-	@node tests/web_test.js "$$PWD/examples/web/page.js"
+	@./bin/klangc web build examples/web.kkg
+	@ran=0; \
+	for js in bun node; do \
+		command -v $$js >/dev/null || continue; \
+		printf '%-5s ' "$$js"; $$js tests/web_test.js "$$PWD/examples/web/app.js" || exit 1; \
+		ran=1; \
+	done; \
+	[ $$ran = 1 ] || echo "skipping test-web: neither bun nor node installed"
 
 # Every file here must be rejected, with a useful message.
 .PHONY: test-errors
@@ -56,8 +70,8 @@ test-errors: bin/klangc
 	done
 
 .PHONY: check
-check: test test-gc test-errors
+check: test test-gc test-new test-errors
 
 .PHONY: clean
 clean:
-	rm -rf bin
+	rm -rf bin .klang

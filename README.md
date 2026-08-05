@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.15 — Phase 14 complete
+## Status: v0.17 — Phase 16 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -88,10 +88,18 @@ aspirational.
   JavaScript; module-level `let mut` holds the state an event handler needs.
   [std/dom](std/dom.kkg) builds a safe API on top, and
   [examples/web.kkg](examples/web.kkg) is a whole page — state, rendering, events —
-  with no JavaScript in it. `make test-web` drives it headlessly under Node.
+  with no JavaScript in it.
+- **A toolchain, not just a compiler** — `klangc new` writes a project that
+  already runs (web, cli or server); `klangc run` compiles, builds and executes a
+  native program; `klangc web run` does the same for a page — emcc, a dev server,
+  and a browser, in one command. It serves with **bun** if it is installed and
+  node otherwise; both are supported and `make test-web` runs the example under
+  each. The dev server is generated rather than depended on, and `make check`
+  scaffolds all three project kinds and runs them.
 
 Still missing: threads on the web (they need `SharedArrayBuffer` and cross-origin
-isolation), traits, and all tooling (REPL, formatter, linter, package manager).
+isolation), traits, and the rest of the tooling — a package manager, a REPL, a
+formatter, a linter.
 `std/net` is POSIX only; Windows needs the Winsock variant.
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
@@ -207,14 +215,39 @@ Requires a C99 compiler (`gcc` or `clang`).
 ```sh
 make            # builds bin/klangc
 make check      # runs the examples and the compile-error tests
+make test-web   # builds the browser example and drives it headlessly
 ```
+
+`make check` needs only a C compiler. `make test-web` also wants
+[Emscripten](https://emscripten.org) and [bun](https://bun.sh) or node, and
+skips itself politely when they are absent.
 
 ## Try it
 
 ```sh
-bin/klangc examples/phase2.kkg -o out.c
-gcc -O2 -o out out.c
-./out
+bin/klangc new myapp     # a project that already runs
+cd myapp
+klangc web run           # build it, serve it, open a browser
+```
+
+`new` writes a working program, not a folder of empty files:
+
+```
+myapp/
+  src/main.kkg      the program
+  web/index.html    the page
+  README.md         how to run this one
+  .gitignore
+```
+
+`--kind cli` gives a console program and `--kind server` an HTTP server; both run
+with `klangc run`. All three are built and executed by `make check`.
+
+Or point the compiler at a file directly:
+
+```sh
+bin/klangc run examples/phase2.kkg
+bin/klangc web run examples/web.kkg
 ```
 
 ## License

@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.15)
+# Klang Language Spec (v0.17)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -624,19 +624,58 @@ const PORT = 8080
 A module-level `let` without `mut` is rejected, because it would say nothing `const`
 does not.
 
-### Building
-
-`klangc` writes two files when a program uses `js fn`: the C, and a `.lib.js`
-holding the JavaScript half. It prints the `emcc` command that joins them.
+### Starting, and running
 
 ```sh
-klangc examples/web.kkg -o web.c
-emcc -O2 web.c --js-library web.lib.js -o page.js -sALLOW_MEMORY_GROWTH
+klangc new myapp        # a project that already runs
+cd myapp
+klangc web run          # build it, serve it, open a browser
 ```
+
+`klangc new` lays down a working program, not a folder of empty files — change a
+line and see the change. Three kinds, one layout:
+
+```
+myapp/
+  src/main.kkg      the program
+  web/index.html    the page          (--kind web, the default)
+  README.md         how to run this one
+  .gitignore        what not to commit
+```
+
+`--kind cli` gives a console program and `--kind server` an HTTP server; both are
+run with `klangc run`. All three are built and executed by `make check`, because
+a scaffold that has rotted is worse than none — it fails on someone's first
+minute with the language.
+
+`klangc web run` is then the whole loop. It finds the program, compiles it,
+builds it with `emcc`, serves it, and opens a browser.
+
+- **The program** is the file you name, or `main.kkg` / `src/main.kkg` /
+  `app.kkg` / `web.kkg` if you name none.
+- **The page** is your `index.html` — beside the program, in a directory named
+  after it, or in `web/`. Otherwise a plain one is generated under `.klang/`, so
+  the first run works before you have written any HTML.
+- **The server** is `bun` if it is installed and `node` otherwise. Both are
+  supported and both are tested; `klangc` prints which one it used, because the
+  two do differ and a silent choice is a worse surprise. The server itself is
+  generated — there is no dependency to install and nothing to check in.
+- `--port <n>` and `--no-open` do what they say. `klangc web build` stops after
+  the build, for when you have a server of your own.
+
+Underneath, `klangc` writes two files for a program that uses `js fn` — the C,
+and a `.lib.js` holding the JavaScript half — and joins them with:
+
+```sh
+emcc -O2 app.c --js-library app.lib.js -o app.js -sALLOW_MEMORY_GROWTH \
+     -sEXPORTED_RUNTIME_METHODS=ccall
+```
+
+`web run` prints that line as it runs it, so nothing about the build is hidden.
 
 [examples/web.kkg](../examples/web.kkg) is a complete page — state, rendering,
 events — with no JavaScript in it. `make test-web` builds it and drives it under
-Node against a stub DOM, so the claim is tested rather than asserted.
+both Bun and Node against a stub DOM, so the claim is tested rather than asserted.
 
 ## The collector
 
@@ -768,7 +807,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.15, Phase 14 complete)
+## Implemented today (v0.17, Phase 16 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -800,6 +839,28 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 16 additions — a project, from nothing**
+- **`klangc new <name>`** — a project that already runs. `--kind web` (default),
+  `cli`, or `server`; one layout for all three: `src/main.kkg`, `web/index.html`,
+  a README that says how to run this one, and a `.gitignore`.
+- **`klangc run [file]`** — compile, build and execute a native program, so both
+  kinds of program are reached the same way and neither is the awkward one.
+  Exits with whatever the program exits with.
+- `web run` now also finds `web/index.html`, which is the layout `new` lays down
+- `make check` scaffolds all three kinds, runs the cli one, builds the server one
+  warning-clean, and drives the web one's button — a rotted scaffold fails on
+  someone's first minute with the language, so it is not left untested
+
+**Phase 15 additions — one command to run a page**
+- **`klangc web run`** — finds the program, compiles it, builds it with emcc,
+  serves it, opens a browser. `web build` stops after the build.
+- **Bun and Node are both supported**, Bun preferred, and `make test-web` runs the
+  browser example under whichever of the two is installed — both, when both are
+- The dev server is generated, not depended on: one small script that runs under
+  either runtime, refuses `../` traversal, and sends `application/wasm` correctly
+- Zero config — a lone `main.kkg` is enough. A project with no `index.html` gets a
+  plain generated one so the first run works before any HTML has been written.
 
 **Phase 14 additions — the browser**
 - **`js fn`** — a function whose body is JavaScript, taken verbatim. The compiler
