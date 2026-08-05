@@ -1,0 +1,188 @@
+// The API half of the full-stack example: a REST service, in Klang, compiled to a
+// native executable.
+//
+//     klangc build examples/fullstack/api.kkg -o api
+//     ./api 8099
+//
+//     GET    /api/tasks        every task, as JSON
+//     POST   /api/tasks        {"title": "..."} -> the task that was created
+//     PUT    /api/tasks/<id>   {"done": true}   -> the task that was changed
+//     DELETE /api/tasks/<id>   removes it
+//     GET    /api/health       a heartbeat, with the heap size
+//
+// Nothing in this file is unsafe and nothing in it is about memory. std/net does
+// the socket work once, behind a Result API.
+
+import "std/net"
+import "std/http"
+import "std/json"
+import "std/list"
+import "std/string" as str
+
+struct Task {
+    id: int,
+    title: string,
+    done: bool,
+}
+
+let mut tasks: [Task] = []
+let mut nextId = 1
+let mut served = 0
+
+// ── the store ─────────────────────────────────────────────────────────
+
+fn indexOfId(id: int) -> int {
+    for i in 0..tasks.len() {
+        if tasks[i].id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+fn asJson(t: Task) -> json.Json {
+    return Obj([
+        json.field("id", json.numOf(t.id)),
+        json.field("title", Str(t.title)),
+        json.field("done", Bool(t.done)),
+    ])
+}
+
+fn allJson() -> string {
+    let mut items: [json.Json] = []
+    for t in tasks {
+        push(items, asJson(t))
+    }
+    return json.stringify(Arr(items))
+}
+
+fn textField(doc: json.Json, key: string) -> string {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asString(v) { Some(s) => s, None => "" },
+        None    => "",
+    }
+}
+
+fn boolField(doc: json.Json, key: string) -> bool {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asBool(v) { Some(b) => b, None => false },
+        None    => false,
+    }
+}
+
+// ── routing ───────────────────────────────────────────────────────────
+//
+// "/api/tasks/7" -> 7, and -1 for anything that is not that shape. A bad id is a
+// 404 rather than a crash, which is the whole reason parseInt returns a Result.
+
+fn taskId(path: string) -> int {
+    let prefix = "/api/tasks/"
+    if !path.startsWith(prefix) {
+        return -1
+    }
+    return match str.parseInt(path.substr(prefix.len(), path.len())) {
+        Ok(n)  => n,
+        Err(_) => -1,
+    }
+}
+
+fn listTasks() -> http.Response {
+    return http.json(allJson())
+}
+
+fn createTask(body: string) -> http.Response {
+    match json.parse(body) {
+        Err(e) => { return http.badRequest("body is not JSON: ${e}") }
+        Ok(doc) => {
+            let title = str.trim(textField(doc, "title"))
+            if title == "" {
+                return http.badRequest("a task needs a title")
+            }
+            let t = Task { id: nextId, title: title, done: false }
+            nextId += 1
+            push(tasks, t)
+            return http.reply(201, "application/json", json.stringify(asJson(t)))
+        }
+    }
+}
+
+fn updateTask(id: int, body: string) -> http.Response {
+    let i = indexOfId(id)
+    if i < 0 {
+        return http.notFound()
+    }
+    match json.parse(body) {
+        Err(e) => { return http.badRequest("body is not JSON: ${e}") }
+        Ok(doc) => {
+            let t = Task { id: id, title: tasks[i].title, done: boolField(doc, "done") }
+            tasks[i] = t
+            return http.json(json.stringify(asJson(t)))
+        }
+    }
+}
+
+fn deleteTask(id: int) -> http.Response {
+    let i = indexOfId(id)
+    if i < 0 {
+        return http.notFound()
+    }
+    remove(tasks, i)
+    return http.noContent()
+}
+
+fn route(req: http.Request) -> http.Response {
+    // A browser asks permission before a cross-origin POST. Answering that is not
+    // optional if the page and the API are on different ports, which in
+    // development they always are.
+    if req.method == "OPTIONS" {
+        return http.noContent()
+    }
+    if req.path == "/api/health" {
+        return http.json(json.stringify(Obj([
+            json.field("ok", Bool(true)),
+            json.field("tasks", json.numOf(tasks.len())),
+            json.field("served", json.numOf(served)),
+            json.field("heapBytes", json.numOf(gcHeap())),
+        ])))
+    }
+    if req.path == "/api/tasks" {
+        if req.method == "GET"  { return listTasks() }
+        if req.method == "POST" { return createTask(req.body) }
+        return http.notAllowed()
+    }
+    let id = taskId(req.path)
+    if id >= 0 {
+        if req.method == "PUT"    { return updateTask(id, req.body) }
+        if req.method == "DELETE" { return deleteTask(id) }
+        return http.notAllowed()
+    }
+    return http.notFound()
+}
+
+fn handle(req: http.Request) -> http.Response {
+    served += 1
+    // Every reply carries the CORS headers, including the errors — a 404 the
+    // browser refuses to read is a 404 nobody can debug.
+    return http.allowOrigin(route(req), "*")
+}
+
+fn main() {
+    push(tasks, Task { id: 1, title: "write a language", done: true })
+    push(tasks, Task { id: 2, title: "give it a garbage collector", done: true })
+    push(tasks, Task { id: 3, title: "serve an API from it", done: false })
+    nextId = 4
+
+    match net.listenOn(8099) {
+        Err(e) => println("cannot start: ${e}")
+        Ok(listener) => {
+            println("klang api on http://127.0.0.1:8099")
+            while true {
+                match net.acceptOne(listener) {
+                    Err(e)   => println("accept: ${e}")
+                    Ok(conn) => http.serveOne(conn, handle)
+                }
+            }
+            net.closeListener(listener)
+        }
+    }
+}

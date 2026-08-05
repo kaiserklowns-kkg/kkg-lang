@@ -9,3 +9,5 @@ output.c
 examples/web/index.html
 examples/web/app.js
 examples/web/app.wasm
+examples/fullstack/api
+examples/fullstack/api.exe

@@ -57,6 +57,23 @@ test-web: bin/klangc
 	done; \
 	[ $$ran = 1 ] || echo "skipping test-web: neither bun nor node installed"
 
+# The full stack, with nothing stubbed between the halves: the API runs as a
+# native binary and the page runs as WebAssembly, talking to it over real HTTP.
+# Both are Klang. This is the one test where a failure could be in the UI, the
+# server, the JSON, or the socket — which is the point of having it.
+.PHONY: test-fullstack
+test-fullstack: bin/klangc
+	@command -v emcc >/dev/null || { echo "skipping test-fullstack: emcc not installed"; exit 0; }
+	@js=$$(command -v bun || command -v node || true); \
+	if [ -z "$$js" ]; then echo "skipping test-fullstack: neither bun nor node"; exit 0; fi; \
+	./bin/klangc build examples/fullstack/api.kkg -o /tmp/klang_api > /dev/null; \
+	./bin/klangc web build examples/fullstack/app.kkg > /dev/null; \
+	/tmp/klang_api > /dev/null & api=$$!; \
+	sleep 1; \
+	"$$js" tests/fullstack_test.js "$$PWD/.klang/app/app.js"; rc=$$?; \
+	kill $$api 2>/dev/null; \
+	exit $$rc
+
 # Every file here must be rejected, with a useful message.
 .PHONY: test-errors
 test-errors: bin/klangc

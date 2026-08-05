@@ -1,0 +1,235 @@
+// The UI half of the full-stack example. Same language as the API next to it —
+// this one compiles to WebAssembly instead of a binary.
+//
+//     klangc build examples/fullstack/api.kkg -o api && ./api &
+//     klangc web run examples/fullstack/app.kkg
+//
+// There is no local copy of the data. Every change goes to the server and the
+// list is whatever the server last said it was, which is the only way a second
+// browser tab does not show something different.
+
+import "std/ui"
+import "std/css"
+import "std/dom"
+import "std/fetch"
+import "std/json"
+import "std/list"
+import "std/string" as str
+
+const API = "http://127.0.0.1:8099/api"
+
+struct Task {
+    id: int,
+    title: string,
+    done: bool,
+}
+
+let mut tasks: [Task] = []
+let mut status = "loading…"
+let mut busy = false
+
+// ── reading what the server sent ──────────────────────────────────────
+
+fn intField(doc: json.Json, key: string) -> int {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asFloat(v) { Some(n) => toInt(n), None => 0 },
+        None    => 0,
+    }
+}
+
+fn textField(doc: json.Json, key: string) -> string {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asString(v) { Some(s) => s, None => "" },
+        None    => "",
+    }
+}
+
+fn boolField(doc: json.Json, key: string) -> bool {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asBool(v) { Some(b) => b, None => false },
+        None    => false,
+    }
+}
+
+fn taskOf(doc: json.Json) -> Task {
+    return Task { id: intField(doc, "id"), title: textField(doc, "title"),
+                  done: boolField(doc, "done") }
+}
+
+// ── talking to it ─────────────────────────────────────────────────────
+//
+// One place decides what a reply means, so every request handles both outcomes
+// the same way and none of them can quietly do nothing.
+
+fn tookList(body: string) {
+    match json.parse(body) {
+        Err(e) => { status = "server sent something odd: ${e}" }
+        Ok(doc) => {
+            tasks = []
+            for item in json.items(doc) {
+                push(tasks, taskOf(item))
+            }
+            status = "${tasks.len()} from the server"
+        }
+    }
+    busy = false
+    ui.refresh()
+}
+
+fn failed(why: string) {
+    status = "the API is not answering: ${why}"
+    busy = false
+    ui.refresh()
+}
+
+fn reload() {
+    busy = true
+    ui.refresh()
+    fetch.get("${API}/tasks", tookList, failed)
+}
+
+// Every change is followed by a reload, so what is on screen is what the server
+// has rather than what this page hoped it would have.
+fn afterChange(_body: string) {
+    reload()
+}
+
+fn add() {
+    let title = str.trim(ui.valueOf("#entry"))
+    if title == "" {
+        status = "type something first"
+        ui.refresh()
+        return
+    }
+    busy = true
+    dom.setValue("#entry", "")
+    ui.focus("#entry")
+    ui.refresh()
+    fetch.post("${API}/tasks", json.stringify(Obj([json.field("title", Str(title))])),
+               afterChange, failed)
+}
+
+fn toggle(t: Task) {
+    busy = true
+    ui.refresh()
+    fetch.put("${API}/tasks/${t.id}",
+              json.stringify(Obj([json.field("done", Bool(!t.done))])),
+              afterChange, failed)
+}
+
+fn removeTask(id: int) {
+    busy = true
+    ui.refresh()
+    fetch.del("${API}/tasks/${id}", afterChange, failed)
+}
+
+fn checkHealth() {
+    fetch.get("${API}/health",
+        |body| {
+            match json.parse(body) {
+                Err(e)  => { status = "health check unreadable: ${e}" }
+                Ok(doc) => {
+                    status = "server: ${intField(doc, "tasks")} tasks, "
+                           + "${intField(doc, "served")} requests, "
+                           + "${intField(doc, "heapBytes")} bytes of heap"
+                }
+            }
+            ui.refresh()
+        },
+        failed)
+}
+
+// ── the page ──────────────────────────────────────────────────────────
+
+fn row(t: Task) -> ui.Node {
+    return ui.keyed(ui.with(ui.item([
+        ui.with(ui.button(if t.done { "☑" } else { "☐" }, || toggle(t)),
+                [ui.class("mark")]),
+        ui.tag("span", t.title),
+        ui.with(ui.button("×", || removeTask(t.id)), [ui.class("delete")]),
+    ]), [ui.class(if t.done { "task done" } else { "task" })]), "${t.id}")
+}
+
+fn view() -> ui.Node {
+    let left = list.count(tasks, |t| !t.done)
+    return ui.col([
+        ui.h1("Klang, end to end"),
+        ui.with(ui.line("This page is WebAssembly. The API it talks to is a native "
+                      + "binary. Both are Klang, and neither knows the other is."),
+                [ui.class("sub")]),
+
+        ui.onSubmit(ui.form([
+            ui.input([ui.id("entry"), ui.placeholder("something to do"),
+                      ui.attr("autocomplete", "off")]),
+            ui.tag("button", "add"),
+        ]), add),
+
+        if tasks.len() == 0 {
+            ui.list([ui.with(ui.item([ui.text("nothing here")]), [ui.class("empty")])])
+        } else {
+            ui.list(list.map(tasks, row))
+        },
+
+        ui.with(ui.div([
+            ui.tag("span", "${left} of ${tasks.len()} left"),
+            ui.with(ui.tag("span", if busy { "…" } else { status }), [ui.class("message")]),
+            ui.span([
+                ui.button("reload", reload),
+                ui.button("health", checkHealth),
+            ]),
+        ]), [ui.class("status")]),
+    ])
+}
+
+fn styles() -> [css.Block] {
+    return [
+        css.rule(":root", [css.colorScheme("light dark")]),
+        css.rule("body", [css.font("16px/1.5 system-ui, sans-serif"),
+                          css.maxWidth("34rem"), css.margin("3rem auto"),
+                          css.padding("0 1rem")]),
+        css.rule("h1", [css.fontSize("1.4rem"), css.marginBottom(".2rem")]),
+        css.rule(".sub", [css.marginTop("0"), css.opacity(".7"), css.fontSize(".9rem")]),
+        css.rule("form", [css.display("flex"), css.gap(".5rem"),
+                          css.margin("1.2rem 0 .8rem")]),
+        css.rule("input", [css.flex("1"), css.padding(".5rem .7rem"),
+                           css.border("1px solid #8886"), css.radius(".4rem"),
+                           css.background("transparent"), css.color("inherit"),
+                           css.font("inherit")]),
+        css.rule("button", [css.padding(".5rem .9rem"), css.border("1px solid #8886"),
+                            css.radius(".4rem"), css.background("transparent"),
+                            css.color("inherit"), css.font("inherit"),
+                            css.cursor("pointer")]),
+        css.rule("button:hover", [css.background("#8882")]),
+        css.rule("ul", [css.listStyle("none"), css.padding("0"), css.margin("0"),
+                        css.border("1px solid #8884"), css.radius(".5rem")]),
+        css.rule("li", [css.display("flex"), css.align("center"), css.gap(".6rem"),
+                        css.padding(".45rem .6rem"),
+                        css.borderBottom("1px solid #8882")]),
+        css.rule("li:last-child", [css.borderBottom("0")]),
+        css.rule("li span", [css.flex("1")]),
+        css.rule("li.done span", [css.opacity(".45"),
+                                  css.textDecoration("line-through")]),
+        css.rule("li.empty", [css.opacity(".5"), css.fontStyle("italic"),
+                              css.justify("center")]),
+        css.rule("li button", [css.border("0"), css.padding(".15rem .45rem"),
+                               css.fontSize("1rem"), css.opacity(".6")]),
+        css.rule(".status", [css.display("flex"), css.justify("space-between"),
+                             css.align("center"), css.gap(".5rem"),
+                             css.fontSize(".85rem"), css.opacity(".75"),
+                             css.marginTop(".8rem")]),
+        css.rule(".status .message", [css.flex("1"), css.textAlign("center")]),
+        css.rule(".status button", [css.padding(".3rem .6rem")]),
+    ]
+}
+
+// Readable from JavaScript, so a test can ask the page what it thinks it has.
+export fn taskCount() -> int {
+    return tasks.len()
+}
+
+fn main() {
+    dom.setTitle("Klang, end to end")
+    dom.useStyle(css.sheet(styles()))
+    ui.mount("#app", view)
+    reload()
+}

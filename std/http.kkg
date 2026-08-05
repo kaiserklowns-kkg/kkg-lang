@@ -17,29 +17,64 @@ pub struct Request {
 pub struct Response {
     status: int,
     contentType: string,
+    // Whole header lines, "Name: Value". An API needs to say things the four
+    // fixed headers cannot — CORS, caching, a Location — and a list of lines is
+    // the smallest thing that lets it.
+    extra: [string],
     body: string,
 }
 
-pub fn ok(body: string) -> Response {
-    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: body }
+fn plain(status: int, body: string) -> Response {
+    return Response { status: status, contentType: "text/plain; charset=utf-8",
+                      extra: [], body: body }
 }
+
+pub fn ok(body: string) -> Response { return plain(200, body) }
+
 pub fn html(body: string) -> Response {
-    return Response { status: 200, contentType: "text/html; charset=utf-8", body: body }
+    return Response { status: 200, contentType: "text/html; charset=utf-8",
+                      extra: [], body: body }
 }
 pub fn json(body: string) -> Response {
-    return Response { status: 200, contentType: "application/json", body: body }
+    return Response { status: 200, contentType: "application/json",
+                      extra: [], body: body }
 }
-pub fn notFound() -> Response {
-    return Response { status: 404, contentType: "text/plain; charset=utf-8", body: "not found\n" }
+pub fn notFound() -> Response { return plain(404, "not found\n") }
+pub fn badRequest(why: string) -> Response { return plain(400, "${why}\n") }
+pub fn notAllowed() -> Response { return plain(405, "method not allowed\n") }
+pub fn noContent() -> Response { return plain(204, "") }
+
+// Any status you like, when the named ones do not fit.
+pub fn reply(status: int, contentType: string, body: string) -> Response {
+    return Response { status: status, contentType: contentType, extra: [], body: body }
 }
-pub fn badRequest(why: string) -> Response {
-    return Response { status: 400, contentType: "text/plain; charset=utf-8", body: "${why}\n" }
+
+pub fn with(r: Response, name: string, value: string) -> Response {
+    let mut lines: [string] = []
+    for h in r.extra {
+        push(lines, h)
+    }
+    push(lines, "${name}: ${value}")
+    return Response { status: r.status, contentType: r.contentType,
+                      extra: lines, body: r.body }
+}
+
+// A browser will not let a page on one origin read a reply from another unless
+// the reply says so. Spelled out here so an API does not have to remember the
+// header names.
+pub fn allowOrigin(r: Response, origin: string) -> Response {
+    return with(with(with(r, "Access-Control-Allow-Origin", origin),
+                     "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
+                "Access-Control-Allow-Headers", "Content-Type")
 }
 
 fn reasonFor(status: int) -> string {
     if status == 200 { return "OK" }
+    if status == 201 { return "Created" }
+    if status == 204 { return "No Content" }
     if status == 400 { return "Bad Request" }
     if status == 404 { return "Not Found" }
+    if status == 405 { return "Method Not Allowed" }
     if status == 500 { return "Internal Server Error" }
     return "OK"
 }
@@ -83,12 +118,14 @@ pub fn parseRequest(raw: string) -> Result<Request, string> {
 }
 
 pub fn render(r: Response) -> string {
-    return "HTTP/1.1 ${r.status} ${reasonFor(r.status)}\r\n"
-         + "Content-Type: ${r.contentType}\r\n"
-         + "Content-Length: ${r.body.len()}\r\n"
-         + "Connection: close\r\n"
-         + "\r\n"
-         + r.body
+    let mut out = "HTTP/1.1 ${r.status} ${reasonFor(r.status)}\r\n"
+                + "Content-Type: ${r.contentType}\r\n"
+                + "Content-Length: ${r.body.len()}\r\n"
+                + "Connection: close\r\n"
+    for h in r.extra {
+        out = out + h + "\r\n"
+    }
+    return out + "\r\n" + r.body
 }
 
 // Reads one request off the connection, hands it to `handle`, writes the reply.
