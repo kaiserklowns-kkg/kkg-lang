@@ -77,7 +77,12 @@ aspirational.
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
   [std/http](std/http.kkg), [std/json](std/json.kkg).
 
-**Frontend is not possible yet.** That needs a WASM target, and there isn't one.
+**Frontend is not possible yet.** Klang's output does compile and run as WASM —
+closures, generics, maps and the standard library all behave — but the collector
+does not work there, because WASM locals are not addressable memory and a
+conservative scan cannot see them. Anything that allocates enough to trigger a
+collection is unsafe. See [docs/WASM.md](docs/WASM.md) for the measurements and
+what has to change.
 `std/net` is POSIX only; Windows needs the Winsock variant.
 
 Also not yet: traits, and all tooling (REPL, formatter, linter, package manager).

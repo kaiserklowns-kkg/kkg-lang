@@ -3955,9 +3955,11 @@ static const char *GC_RUNTIME =
     "void k_oom(void) { fprintf(stderr, \"klang: out of memory\\n\"); exit(1); }\n"
     "\n"
     "size_t k_hash(void *p) {\n"
-    "    uintptr_t x = (uintptr_t)p;\n"
-    "    x ^= x >> 33; x *= (uintptr_t)0xff51afd7ed558ccdULL;\n"
-    "    x ^= x >> 29; x *= (uintptr_t)0xc4ceb9fe1a85ec53ULL;\n"
+    /* Mixing needs 64 bits: uintptr_t is only 32 on wasm32, where shifting by
+       33 would be undefined and the mixing would collapse. */
+    "    uint64_t x = (uint64_t)(uintptr_t)p;\n"
+    "    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;\n"
+    "    x ^= x >> 29; x *= 0xc4ceb9fe1a85ec53ULL;\n"
     "    x ^= x >> 32;\n"
     "    return (size_t)x;\n"
     "}\n"
