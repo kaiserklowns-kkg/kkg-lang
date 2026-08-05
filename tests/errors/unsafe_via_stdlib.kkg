@@ -1,0 +1,5 @@
+import "std/fs"
+fn main() {
+    let f = fs.fopen("/tmp/x", "rb")
+    println("${isNull(f)}")
+}

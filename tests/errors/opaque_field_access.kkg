@@ -1,0 +1,6 @@
+extern type Handle
+extern fn grab() -> Handle
+fn main() {
+    let h = unsafe { grab() }
+    println("${h.inner}")
+}

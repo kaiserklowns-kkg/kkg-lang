@@ -1,0 +1,95 @@
+// std/fs — reading and writing files.
+//
+// This module is the worked example of Klang's FFI safety story. Everything
+// below the line marked "unsafe surface" talks to C and is unsafe. Everything
+// above it is ordinary safe Klang that turns C's conventions — null on failure,
+// short counts, manual close — into values you cannot ignore.
+//
+// Callers never write `unsafe`. That word appears only here, so `grep unsafe`
+// over a project finds every place the type system stopped vouching for you.
+
+extern header "<stdio.h>"
+
+extern type File
+
+extern fn fopen(path: string, mode: string) -> File
+extern fn fclose(f: File) -> int
+extern fn fgetc(f: File) -> int
+extern fn fputs(s: string, f: File) -> int
+extern fn ferror(f: File) -> int
+
+// ── safe surface ──────────────────────────────────────────────────────
+
+pub fn readToString(path: string) -> Result<string, string> {
+    let f = unsafe { fopen(path, "rb") }
+    if isNull(f) {
+        return Err("cannot open '${path}' for reading")
+    }
+    let mut out = ""
+    let mut chunk: [int] = []
+    loopRead(f, chunk)
+    let failed = unsafe { ferror(f) } != 0
+    unsafe { fclose(f) }
+    if failed {
+        return Err("error while reading '${path}'")
+    }
+    for b in chunk {
+        out = out + fromByte(b)
+    }
+    return Ok(out)
+}
+
+pub fn readLines(path: string) -> Result<[string], string> {
+    let text = readToString(path)?
+    let mut lines: [string] = []
+    let mut current = ""
+    for i in 0..len(text) {
+        let b = byteAt(text, i)
+        if b == 10 {
+            push(lines, current)
+            current = ""
+        } else if b != 13 {
+            current = current + fromByte(b)
+        }
+    }
+    if len(current) > 0 {
+        push(lines, current)
+    }
+    return Ok(lines)
+}
+
+pub fn writeString(path: string, contents: string) -> Result<int, string> {
+    let f = unsafe { fopen(path, "wb") }
+    if isNull(f) {
+        return Err("cannot open '${path}' for writing")
+    }
+    let wrote = unsafe { fputs(contents, f) }
+    let failed = unsafe { ferror(f) } != 0
+    unsafe { fclose(f) }
+    if wrote < 0 || failed {
+        return Err("error while writing '${path}'")
+    }
+    return Ok(len(contents))
+}
+
+pub fn exists(path: string) -> bool {
+    let f = unsafe { fopen(path, "rb") }
+    if isNull(f) {
+        return false
+    }
+    unsafe { fclose(f) }
+    return true
+}
+
+// ── unsafe surface ────────────────────────────────────────────────────
+// The only place in this module that touches C without a check around it.
+
+fn loopRead(f: File, mut into: [int]) {
+    while true {
+        let c = unsafe { fgetc(f) }
+        if c < 0 {
+            break
+        }
+        push(into, c)
+    }
+}

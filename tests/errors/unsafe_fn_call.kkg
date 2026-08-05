@@ -1,0 +1,4 @@
+unsafe fn danger() -> int { return 1 }
+fn main() {
+    println("${danger()}")
+}

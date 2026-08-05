@@ -90,7 +90,7 @@ typedef enum {
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_ANDAND, TK_OROR, TK_NOT, TK_PIPE,
     TK_PLUSEQ, TK_MINUSEQ, TK_STAREQ, TK_SLASHEQ, TK_PERCENTEQ,
-    TK_BREAK, TK_CONTINUE, TK_CONST
+    TK_BREAK, TK_CONTINUE, TK_CONST, TK_EXTERN, TK_UNSAFE, TK_TYPE
 } TokKind;
 
 /* One chunk of a string literal. `expr` is the source text inside `${...}`,
@@ -163,6 +163,7 @@ static Token lex_next(Lexer *lx) {
             {"for", TK_FOR}, {"in", TK_IN},
             {"pub", TK_PUB}, {"import", TK_IMPORT}, {"as", TK_AS},
             {"break", TK_BREAK}, {"continue", TK_CONTINUE}, {"const", TK_CONST},
+            {"extern", TK_EXTERN}, {"unsafe", TK_UNSAFE}, {"type", TK_TYPE},
         };
         for (size_t i = 0; i < sizeof kws / sizeof kws[0]; i++) {
             if (strcmp(text, kws[i].kw) == 0) { free(text); return make_tok(kws[i].k, line); }
@@ -491,7 +492,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD
+    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD, EX_UNSAFE
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -549,6 +550,7 @@ struct Stmt {
     bool is_mut;
     bool has_type;
     bool is_range;    /* ST_FOR: `for i in a..b` rather than over an array */
+    bool is_unsafe;   /* ST_BLOCK: an `unsafe { ... }` block */
     Type *decl_type;
     Expr *expr;       /* ST_FOR: the array, or the range's lower bound */
     Expr *expr2;      /* ST_FOR: the range's upper bound */
@@ -564,13 +566,18 @@ typedef struct { char *name; Vec payload; /* Vec<Type*> */ } Variant;
    "<module path>:<name>" — see the module section below for what those look like.
    `name` stays the bare name, for error messages. */
 typedef struct { char *name; char *key; const char *module; bool is_pub;
-                 Vec type_params; Vec fields; char *mangled; } StructDecl;
+                 Vec type_params; Vec fields; char *mangled;
+                 bool is_opaque;   /* extern type: a pointer Klang holds but never opens */
+               } StructDecl;
 typedef struct { char *name; char *key; const char *module; bool is_pub;
                  Vec type_params; Vec variants; char *mangled; } EnumDecl;
 typedef struct {
     char *name; char *key; const char *module; const char *file; bool is_pub;
     Vec type_params; Vec params; /* Vec<Field> */
     Type *ret_type; Vec body; char *mangled;
+    bool is_extern;    /* a C symbol, with no Klang body */
+    bool is_unsafe;    /* callable only from an unsafe context */
+    char *cname;       /* the C symbol to emit, when it differs from the name */
 } FnDecl;
 
 /* A module-level constant. Its initializer is an ordinary expression, evaluated
@@ -599,6 +606,8 @@ static Vec g_modules;
    reach another module, so checking these covers every cross-module access. */
 typedef struct { char *key; const char *from; const char *file; int line; } XRef;
 static Vec g_xrefs;
+static Vec g_c_headers;   /* Vec<char*> — #includes the generated C needs */
+static Vec g_c_links;     /* Vec<char*> — libraries the build needs */
 
 typedef struct {
     Lexer lx;
@@ -621,7 +630,7 @@ static void prescan_types(Parser *p, const char *src) {
     lexer_init(&lx, src);
     Token t = lex_next(&lx);
     while (t.kind != TK_EOF) {
-        if (t.kind == TK_STRUCT || t.kind == TK_ENUM) {
+        if (t.kind == TK_STRUCT || t.kind == TK_ENUM || t.kind == TK_TYPE) {
             Token n = lex_next(&lx);
             if (n.kind == TK_IDENT) VEC_PUSH_PTR(&p->local_types, n.text);
             t = n;
@@ -864,6 +873,18 @@ static Expr *parse_primary(Parser *p) {
         Expr *e = new_expr(EX_STRING, line);
         e->sval = tok.text;
         return e;
+    }
+    if (p_check(p, TK_UNSAFE)) {
+        /* `unsafe { expr }` in expression position; the statement form takes a block. */
+        p_advance(p);
+        Expr *u = new_expr(EX_UNSAFE, line);
+        p_expect(p, TK_LBRACE);
+        bool saved = p->no_struct_lit;
+        p->no_struct_lit = false;
+        u->lhs = parse_expr(p);
+        p->no_struct_lit = saved;
+        p_expect(p, TK_RBRACE);
+        return u;
     }
     /* `|x, y| expr` and `|x, y| { ... }`. A zero-parameter closure is written `||`,
        which the lexer hands over as one token — an expression can never start with
@@ -1174,6 +1195,13 @@ static Stmt *parse_stmt(Parser *p) {
         s->body = parse_block(p);
         return s;
     }
+    if (p_check(p, TK_UNSAFE)) {
+        p_advance(p);
+        Stmt *s = new_stmt(ST_BLOCK, line);
+        s->is_unsafe = true;
+        s->body = parse_block(p);
+        return s;
+    }
     if (p_match(p, TK_BREAK)) return new_stmt(ST_BREAK, line);
     if (p_match(p, TK_CONTINUE)) return new_stmt(ST_CONTINUE, line);
 
@@ -1256,6 +1284,45 @@ static void parse_program(Parser *p) {
         if (p_check(p, TK_IMPORT))
             fail(p->cur.line, "'import' must appear before any declaration");
         bool is_pub = p_match(p, TK_PUB);
+        bool is_extern = false, is_unsafe = false;
+
+        /* `extern header "..."` and `extern link "..."` say what the generated C
+           needs; they are build information, not declarations. */
+        if (p_check(p, TK_EXTERN)) {
+            Lexer save_lx = p->lx;
+            Token save_cur = p->cur;
+            p_advance(p);
+            if (p_check(p, TK_IDENT) &&
+                (strcmp(p->cur.text, "header") == 0 || strcmp(p->cur.text, "link") == 0)) {
+                bool is_header = strcmp(p->cur.text, "header") == 0;
+                int line = p->cur.line;
+                p_advance(p);
+                if (!p_check(p, TK_STRING))
+                    fail(line, "expected a quoted name after 'extern %s'",
+                         is_header ? "header" : "link");
+                VEC_PUSH_PTR(is_header ? &g_c_headers : &g_c_links, p->cur.text);
+                p_advance(p);
+                continue;
+            }
+            if (p_check(p, TK_TYPE)) {
+                p_advance(p);
+                StructDecl *sd = calloc(1, sizeof(StructDecl));
+                sd->name = p_expect(p, TK_IDENT).text;
+                sd->module = p->module; sd->is_pub = is_pub; sd->is_opaque = true;
+                sd->key = qual_key(p->module, sd->name);
+                vec_init(&sd->type_params, sizeof(char *));
+                vec_init(&sd->fields, sizeof(Field));
+                Decl *d = vec_push(&g_decls);
+                memset(d, 0, sizeof *d);
+                d->kind = DECL_STRUCT; d->s = sd;
+                continue;
+            }
+            p->lx = save_lx; p->cur = save_cur;   /* it was `extern fn` */
+            p_advance(p);
+            is_extern = true;
+            is_unsafe = true;      /* every C call is unsafe by construction */
+        }
+        if (p_match(p, TK_UNSAFE)) is_unsafe = true;
 
         if (p_check(p, TK_STRUCT)) {
             p_advance(p);
@@ -1308,6 +1375,7 @@ static void parse_program(Parser *p) {
             memset(d, 0, sizeof *d);
             d->kind = DECL_ENUM; d->e = ed;
         } else if (p_check(p, TK_FN)) {
+            int fd_line = p->cur.line;
             p_advance(p);
             FnDecl *fd = calloc(1, sizeof(FnDecl));
             fd->name = p_expect(p, TK_IDENT).text;
@@ -1327,7 +1395,21 @@ static void parse_program(Parser *p) {
             }
             p_expect(p, TK_RPAREN);
             fd->ret_type = p_match(p, TK_ARROW) ? parse_type(p) : ty_void();
-            fd->body = parse_block(p);
+            fd->is_extern = is_extern;
+            fd->is_unsafe = is_unsafe;
+            if (is_extern) {
+                if (fd->type_params.count != 0)
+                    fail(fd_line, "an extern function cannot be generic — C has no generics");
+                /* `= "cos"` when the C symbol differs from the Klang name. */
+                if (p_match(p, TK_EQ)) {
+                    if (!p_check(p, TK_STRING)) fail(p->cur.line, "expected a quoted C symbol name");
+                    fd->cname = p->cur.text;
+                    p_advance(p);
+                } else fd->cname = fd->name;
+                vec_init(&fd->body, sizeof(Stmt *));
+            } else {
+                fd->body = parse_block(p);
+            }
             p->tparams = NULL;
             Decl *d = vec_push(&g_decls);
             memset(d, 0, sizeof *d);
@@ -1529,6 +1611,7 @@ static Stmt *clone_stmt(Stmt *s, const Vec *subst) {
     c->is_mut = s->is_mut;
     c->has_type = s->has_type;
     c->is_range = s->is_range;
+    c->is_unsafe = s->is_unsafe;
     c->decl_type = s->decl_type ? subst_type(s->decl_type, subst) : NULL;
     c->expr = clone_expr(s->expr, subst);
     c->expr2 = clone_expr(s->expr2, subst);
@@ -1653,6 +1736,7 @@ static void request_type(Type *t, int line) {
         Vec subst = make_subst(&gs->type_params, &t->args, "struct", t->name, line);
         StructDecl *sd = calloc(1, sizeof(StructDecl));
         sd->name = gs->name; sd->key = gs->key; sd->module = gs->module; sd->is_pub = gs->is_pub;
+        sd->is_opaque = gs->is_opaque;
         sd->mangled = mangled;
         vec_init(&sd->type_params, sizeof(char *));
         vec_init(&sd->fields, sizeof(Field));
@@ -1703,6 +1787,8 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
     /* `main` is emitted as klang_main; the real C main is a wrapper that anchors
        the collector's stack scan below every Klang frame. */
     if (strcmp(generic->name, "main") == 0) mangled = strdup("klang_main");
+    /* An extern is called by its C symbol, and nothing is emitted for it. */
+    if (generic->is_extern) mangled = strdup(generic->cname);
     if (find_mono_fn(mangled)) return mangled;
 
     if (g_mono_fns.count > MAX_INSTANCES)
@@ -1713,6 +1799,10 @@ static char *request_fn(FnDecl *generic, const Vec *type_args, int line) {
     FnDecl *fd = calloc(1, sizeof(FnDecl));
     fd->name = generic->name; fd->key = generic->key; fd->module = generic->module;
     fd->file = generic->file; fd->is_pub = generic->is_pub;
+    fd->is_extern = generic->is_extern; fd->is_unsafe = generic->is_unsafe;
+    fd->cname = generic->cname;
+    fd->is_extern = generic->is_extern; fd->is_unsafe = generic->is_unsafe;
+    fd->cname = generic->cname;
     fd->mangled = mangled;
     vec_init(&fd->type_params, sizeof(char *));
     vec_init(&fd->params, sizeof(Field));
@@ -1787,6 +1877,7 @@ static Var *lookup_capturing(Scope *sc, const char *name) {
 /* ───────────────────────── typecheck ───────────────────────── */
 
 static Type *g_cur_ret;  /* return type of the function being checked (for `?`) */
+static int g_unsafe_depth;     /* inside an unsafe fn or unsafe block */
 static int g_loop_depth;       /* 0 outside any loop, so break/continue can be checked */
 static bool g_ret_inferring;   /* inside a block closure with no declared result */
 static Type *g_ret_found;      /* what its `return` statements settled on */
@@ -2091,12 +2182,17 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             return tc_indirect(e, v->type, sc, labelf("'%s'", e->sval));
         }
     }
-    if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
+    /* A function you defined wins over a builtin of the same name: your own module
+       is the nearer scope, and a builtin should never make your code uncallable. */
+    bool shadowed = !e->is_qual &&
+        find_fn(qual_key(e->mod ? e->mod : g_cur_module, e->sval)) != NULL;
+
+    if (!shadowed && (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0)) {
         if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
         tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
         return ty_void();
     }
-    if (strcmp(e->sval, "assert") == 0) {
+    if (!shadowed && strcmp(e->sval, "assert") == 0) {
         if (e->args.count != 2)
             fail(e->line, "'assert' takes 2 arguments: the condition and a message");
         Type *ct = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_bool());
@@ -2105,15 +2201,23 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (mt->kind != TY_STRING) fail(e->line, "'assert' needs a string message, got %s", ty_str(mt));
         return ty_void();
     }
-    if (strcmp(e->sval, "gcCollect") == 0) {
+    if (!shadowed && strcmp(e->sval, "isNull") == 0) {
+        if (e->args.count != 1) fail(e->line, "'isNull' takes exactly 1 argument");
+        Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        StructDecl *sd = at->kind == TY_NAMED ? find_mono_struct(ty_mangle(at)) : NULL;
+        if (!sd || !sd->is_opaque)
+            fail(e->line, "'isNull' only applies to an 'extern type' handle, got %s", ty_str(at));
+        return ty_bool();
+    }
+    if (!shadowed && strcmp(e->sval, "gcCollect") == 0) {
         if (e->args.count != 0) fail(e->line, "'gc_collect' takes no arguments");
         return ty_void();
     }
-    if (strcmp(e->sval, "gcHeap") == 0) {
+    if (!shadowed && strcmp(e->sval, "gcHeap") == 0) {
         if (e->args.count != 0) fail(e->line, "'gc_heap' takes no arguments");
         return ty_int();
     }
-    if (strcmp(e->sval, "len") == 0) {
+    if (!shadowed && strcmp(e->sval, "len") == 0) {
         if (e->args.count != 1) fail(e->line, "'len' takes exactly 1 argument");
         Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
         if (at->kind != TY_ARRAY && at->kind != TY_STRING && at->kind != TY_MAP)
@@ -2122,7 +2226,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
     }
     /* The string kernel. Everything else — split, trim, case conversion, parsing —
        is written in Klang on top of these, in std/string. */
-    if (strcmp(e->sval, "substr") == 0) {
+    if (!shadowed && strcmp(e->sval, "substr") == 0) {
         if (e->args.count != 3)
             fail(e->line, "'substr' takes 3 arguments: the string, start, and end");
         Type *st = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_string());
@@ -2133,7 +2237,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         }
         return ty_string();
     }
-    if (strcmp(e->sval, "byteAt") == 0) {
+    if (!shadowed && strcmp(e->sval, "byteAt") == 0) {
         if (e->args.count != 2) fail(e->line, "'byte_at' takes 2 arguments: the string and an index");
         Type *st = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_string());
         if (st->kind != TY_STRING) fail(e->line, "'byte_at' needs a string, got %s", ty_str(st));
@@ -2141,13 +2245,13 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (it->kind != TY_INT) fail(e->line, "'byte_at' index must be int, got %s", ty_str(it));
         return ty_int();
     }
-    if (strcmp(e->sval, "fromByte") == 0) {
+    if (!shadowed && strcmp(e->sval, "fromByte") == 0) {
         if (e->args.count != 1) fail(e->line, "'from_byte' takes exactly 1 argument");
         Type *it = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, ty_int());
         if (it->kind != TY_INT) fail(e->line, "'from_byte' needs an int, got %s", ty_str(it));
         return ty_string();
     }
-    if (strcmp(e->sval, "indexOf") == 0) {
+    if (!shadowed && strcmp(e->sval, "indexOf") == 0) {
         if (e->args.count != 2)
             fail(e->line, "'index_of' takes 2 arguments: the string and what to look for");
         for (int i = 0; i < 2; i++) {
@@ -2156,7 +2260,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         }
         return ty_int();
     }
-    if (strcmp(e->sval, "has") == 0 || strcmp(e->sval, "remove") == 0) {
+    if (!shadowed && (strcmp(e->sval, "has") == 0 || strcmp(e->sval, "remove") == 0)) {
         bool removing = strcmp(e->sval, "remove") == 0;
         if (e->args.count != 2)
             fail(e->line, "'%s' takes 2 arguments: the map and the key", e->sval);
@@ -2175,13 +2279,13 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             fail(e->line, "this map is keyed by %s, got %s", ty_str(ty_key(mt)), ty_str(kt));
         return removing ? ty_void() : ty_bool();
     }
-    if (strcmp(e->sval, "keys") == 0 || strcmp(e->sval, "values") == 0) {
+    if (!shadowed && (strcmp(e->sval, "keys") == 0 || strcmp(e->sval, "values") == 0)) {
         if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
         Type *mt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
         if (mt->kind != TY_MAP) fail(e->line, "'%s' needs a map, got %s", e->sval, ty_str(mt));
         return ty_array(strcmp(e->sval, "keys") == 0 ? ty_key(mt) : ty_val(mt));
     }
-    if (strcmp(e->sval, "get") == 0) {
+    if (!shadowed && strcmp(e->sval, "get") == 0) {
         if (e->args.count != 2)
             fail(e->line, "'get' takes 2 arguments: the map and the key");
         Type *mt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
@@ -2193,7 +2297,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         VEC_PUSH_PTR(&opt->args, ty_val(mt));
         return opt;
     }
-    if (strcmp(e->sval, "push") == 0) {
+    if (!shadowed && strcmp(e->sval, "push") == 0) {
         if (e->args.count != 2) fail(e->line, "'push' takes exactly 2 arguments: the array and the value");
         Expr *arr = VEC_PTR(&e->args, 0, Expr);
         Type *at = tc_expr(arr, sc, NULL);
@@ -2209,7 +2313,7 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
             fail(e->line, "cannot push %s into %s", ty_str(vt), ty_str(at));
         return ty_void();
     }
-    if (strcmp(e->sval, "toString") == 0) {
+    if (!shadowed && strcmp(e->sval, "toString") == 0) {
         if (e->args.count != 1) fail(e->line, "'to_string' takes exactly 1 argument");
         Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
         if (at->kind == TY_NAMED)
@@ -2232,6 +2336,16 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         shown = e->sval;
         if (!fn) fail(e->line, "call to undefined function '%s'", e->sval);
     }
+    /* The whole point of the FFI safety story: a C call, or anything declared
+       unsafe, can only be reached from a context that has taken responsibility. */
+    if (fn->is_unsafe && g_unsafe_depth == 0)
+        fail(e->line, fn->is_extern
+                 ? "'%s' is a C function, so calling it is unsafe — wrap the call in "
+                   "'unsafe { ... }', or expose it through a safe function that checks "
+                   "what C cannot"
+                 : "'%s' is unsafe — call it inside 'unsafe { ... }', or mark the "
+                   "calling function 'unsafe' to pass the obligation on",
+             shown);
     if (e->args.count != fn->params.count)
         fail(e->line, "'%s' expects %d argument(s), got %d", shown, fn->params.count, e->args.count);
 
@@ -2418,6 +2532,9 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
                     VEC_PUSH_PTR(&ft->args, ((Field *)vec_get(&fn->params, i))->type);
                 VEC_PUSH_PTR(&ft->args, fn->ret_type);
                 Vec none; vec_init(&none, sizeof(Type *));
+                if (fn->is_unsafe)
+                    fail(e->line, "'%s' is unsafe, so it cannot be handed around as a value "
+                                  "— wrap it in a safe function first", key_show(fn->key));
                 e->kind = EX_FNREF;
                 e->resolved = request_fn(fn, &none, e->line);
                 e->type = ft;
@@ -2452,6 +2569,8 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
             lf->lam = e; lf->boundary = boundary;
             int saved_loops = g_loop_depth;
             g_loop_depth = 0;   /* an outer loop is not breakable from inside a closure */
+            int saved_unsafe = g_unsafe_depth;
+            g_unsafe_depth = 0; /* a closure body is its own context, not the caller's */
 
             Type *saved_ret = g_cur_ret;
             bool saved_inferring = g_ret_inferring;
@@ -2480,6 +2599,7 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
             }
             g_cur_ret = saved_ret;
             g_loop_depth = saved_loops;
+            g_unsafe_depth = saved_unsafe;
             g_ret_inferring = saved_inferring;
             g_ret_found = saved_found;
             g_lams.count--;
@@ -2526,6 +2646,11 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
            receiver is looked at once by the method call and again as argument
            zero, so re-checking one has to be a no-op. */
         case EX_CONSTREF: case EX_FNREF: t = e->type; break;
+        case EX_UNSAFE:
+            g_unsafe_depth++;
+            t = tc_expr(e->lhs, sc, expected);
+            g_unsafe_depth--;
+            break;
         case EX_MATCH: t = tc_match(e, sc, expected); break;
         case EX_TRY: t = tc_try(e, sc); break;
         case EX_ARRAY_LIT: {
@@ -2702,7 +2827,11 @@ static void tc_stmt(Stmt *s, Scope *sc) {
             if (g_loop_depth == 0) fail(s->line, "'continue' only works inside a loop");
             break;
         case ST_EXPR: tc_expr(s->expr, sc, NULL); break;
-        case ST_BLOCK: tc_block(&s->body, sc); break;
+        case ST_BLOCK:
+            if (s->is_unsafe) g_unsafe_depth++;
+            tc_block(&s->body, sc);
+            if (s->is_unsafe) g_unsafe_depth--;
+            break;
     }
 }
 
@@ -2720,6 +2849,9 @@ static void tc_fn(FnDecl *fd) {
     }
     g_cur_ret = fd->ret_type;
     g_loop_depth = 0;
+    /* An unsafe function is itself an unsafe context: its callers took on the
+       obligation, so it need not repeat `unsafe` inside. */
+    g_unsafe_depth = fd->is_unsafe ? 1 : 0;
     g_cur_module = fd->module ? fd->module : MOD_ROOT;
     if (fd->file) g_filename = fd->file;   /* so errors name the right file */
     tc_block(&fd->body, &sc);
@@ -2800,7 +2932,8 @@ static void monomorphize_and_check(void) {
     Vec empty; vec_init(&empty, sizeof(Type *));
     for (int i = 0; i < g_decls.count; i++) {
         Decl *d = vec_get(&g_decls, i);
-        if (d->kind == DECL_FN && d->f->type_params.count == 0) request_fn(d->f, &empty, 0);
+        if (d->kind == DECL_FN && !d->f->is_extern && d->f->type_params.count == 0)
+            request_fn(d->f, &empty, 0);
     }
     /* Worklist: checking a body can queue more instantiations. */
     while (g_fn_queue.count > 0) {
@@ -3107,6 +3240,9 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
             break;
         case EX_METHOD:   /* rewritten into EX_CALL during typecheck */
             break;
+        case EX_UNSAFE:   /* purely a promise to the compiler; no code of its own */
+            cg_expr(e->lhs, out, pre, ind);
+            break;
         case EX_MAP_LIT: {
             char *m = ty_mangle(e->type);
             char *tmp = fresh_tmp();
@@ -3139,6 +3275,9 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 sb_append(out, ")");
                 break;
             }
+            /* Only a call the typechecker left unresolved can be a builtin; anything
+               it resolved is a real function, even if it shares a builtin name. */
+            if (!e->resolved) {
             if (strcmp(e->sval, "println") == 0 || strcmp(e->sval, "print") == 0) {
                 Expr *arg = VEC_PTR(&e->args, 0, Expr);
                 const char *fmt;
@@ -3163,6 +3302,12 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 sb_append(out, ", ");
                 cg_expr(VEC_PTR(&e->args, 1, Expr), out, pre, ind);
                 sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "isNull") == 0) {
+                sb_append(out, "((");
+                cg_expr(VEC_PTR(&e->args, 0, Expr), out, pre, ind);
+                sb_append(out, ") == NULL)");
                 break;
             }
             if (strcmp(e->sval, "gcCollect") == 0) { sb_append(out, "klang_gc_collect()"); break; }
@@ -3253,6 +3398,7 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 cg_expr(arg, out, pre, ind);
                 sb_append(out, ")");
                 break;
+            }
             }
             sb_appendf(out, "%s(", e->resolved ? e->resolved : e->sval);
             for (int i = 0; i < e->args.count; i++) {
@@ -3763,6 +3909,11 @@ static void collect_deps(const Type *t, Vec *out) {
 }
 
 static void emit_struct(StructDecl *sd, SB *sb) {
+    if (sd->is_opaque) {
+        /* A C pointer Klang can hold and pass back, but never look inside. */
+        sb_appendf(sb, "typedef void *%s;\n\n", sd->mangled);
+        return;
+    }
     sb_appendf(sb, "typedef struct %s {\n", sd->mangled);
     for (int i = 0; i < sd->fields.count; i++) {
         Field *f = vec_get(&sd->fields, i);
@@ -3979,10 +4130,19 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.8 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.9 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
-    sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n\n");
+    sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
+    /* Whatever the program's `extern header` declarations asked for. Klang emits no
+       prototypes of its own for C functions — the header is the single source of
+       truth for their signatures, so the two can never disagree. */
+    for (int i = 0; i < g_c_headers.count; i++) {
+        const char *h = VEC_PTR(&g_c_headers, i, char);
+        if (h[0] == '<' || h[0] == '"') sb_appendf(sb, "#include %s\n", h);
+        else sb_appendf(sb, "#include \"%s\"\n", h);
+    }
+    sb_append(sb, "\n");
     sb_append(sb, GC_RUNTIME);
     sb_append(sb, RUNTIME);
     sb_append(sb, "\n");
@@ -4010,6 +4170,7 @@ static void codegen(SB *sb) {
 
     for (int i = 0; i < g_mono_fns.count; i++) {
         FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
+        if (fd->is_extern) continue;   /* its header declares it */
         bool is_main = strcmp(fd->name, "main") == 0;
         sb_appendf(sb, "%s %s(", is_main ? "int" : c_type(fd->ret_type), fd->mangled);
         for (int j = 0; j < fd->params.count; j++) {
@@ -4074,6 +4235,7 @@ static void codegen(SB *sb) {
 
     for (int i = 0; i < g_mono_fns.count; i++) {
         FnDecl *fd = VEC_PTR(&g_mono_fns, i, FnDecl);
+        if (fd->is_extern) continue;
         bool is_main = strcmp(fd->name, "main") == 0;
         g_cg_ret = fd->ret_type;
         sb_appendf(sb, "%s %s(", is_main ? "int" : c_type(fd->ret_type), fd->mangled);
@@ -4229,7 +4391,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.8)\n\n"
+        printf("klangc — Klang compiler (0.9)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -4237,7 +4399,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.8.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.9.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";
@@ -4255,6 +4417,8 @@ int main(int argc, char **argv) {
     vec_init(&g_fn_queue, sizeof(FnDecl *));
     vec_init(&g_xrefs, sizeof(XRef));
     vec_init(&g_modules, sizeof(ModuleInfo));
+    vec_init(&g_c_headers, sizeof(char *));
+    vec_init(&g_c_links, sizeof(char *));
     vec_init(&g_loaded, sizeof(char *));
     vec_init(&g_loading, sizeof(char *));
     g_exe_dir = dir_of(argv[0]);
@@ -4274,5 +4438,11 @@ int main(int argc, char **argv) {
     fclose(f);
 
     printf("klangc: compiled '%s' -> '%s'\n", in_path, out_path);
+    if (g_c_links.count) {
+        printf("klangc: link with");
+        for (int i = 0; i < g_c_links.count; i++)
+            printf(" -l%s", VEC_PTR(&g_c_links, i, char));
+        printf("\n");
+    }
     return 0;
 }

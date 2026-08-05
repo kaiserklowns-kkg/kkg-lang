@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.8 — Phase 7 complete
+## Status: v0.9 — Phase 8 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -49,9 +49,17 @@ aspirational.
   GC-allocated so a closure can outlive its maker, and closures nest, sort, and live
   in arrays and maps.
 - **Left-to-right evaluation**, guaranteed where C leaves the order unspecified.
+- **Method calls** — `x.f(a)` is `f(x, a)`, so every function is usable both ways and
+  chains read in the order the work happens.
+- **`const`**, **`break` / `continue`**, **`+= -= *= /= %=`**, nesting `/* */` comments,
+  and **camelCase throughout** — the syntax is settled, not still moving.
+- **Calling C** — `extern fn`, `extern type` handles, `extern header` / `extern link`.
+  Declaring is free; **calling is `unsafe`**, so `grep unsafe` finds every place the
+  compiler stopped vouching for you. [std/fs](std/fs.kkg) does the unsafe work once
+  and exports a fully safe `Result` API — using it needs no `unsafe` at all.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
-  [std/string](std/string.kkg).
+  [std/string](std/string.kkg), [std/fs](std/fs.kkg).
 
 Not yet: traits, concurrency, and all tooling
 (REPL, formatter, linter, package manager). Integer overflow still wraps silently.
@@ -108,6 +116,17 @@ let line   = list.join(list.map(byName, |p| p.name), ", ")
 ```
 
 ```kkg
+// Calling C: declaring is free, calling is unsafe, and a safe wrapper
+// discharges the obligation once so callers never see it.
+extern fn cSqrt(x: float) -> float = "sqrt"
+
+fn squareRoot(x: float) -> Result<float, string> {
+    if x < 0.0 { return Err("no real square root of ${x}") }
+    return Ok(unsafe { cSqrt(x) })
+}
+```
+
+```kkg
 // Modules: private by default, `pub` to export. Maps and text.
 import "std/string" as str
 
@@ -125,7 +144,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/modules.kkg](examples/modules.kkg),
 [examples/phase5.kkg](examples/phase5.kkg),
 [examples/phase6.kkg](examples/phase6.kkg),
-[examples/phase7.kkg](examples/phase7.kkg), and
+[examples/phase7.kkg](examples/phase7.kkg),
+[examples/phase8.kkg](examples/phase8.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build

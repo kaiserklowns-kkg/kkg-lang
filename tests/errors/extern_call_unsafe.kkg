@@ -1,0 +1,5 @@
+extern header "<string.h>"
+extern fn strlen(s: string) -> int
+fn main() {
+    println("${strlen("hi")}")
+}

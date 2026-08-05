@@ -1,5 +1,5 @@
-fn get() -> Result<int, string> { return Ok(1) }
+fn fetch() -> Result<int, string> { return Ok(1) }
 fn main() {
-    let x = get()?
-    println(toString(x))
+    let x = fetch()?
+    println("${x}")
 }

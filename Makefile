@@ -1,6 +1,8 @@
 CC ?= gcc
 CFLAGS ?= -std=c99 -Wall -Wextra -O2
-EXAMPLES := hello basics phase1 phase2 gc modules phase5 phase6 phase7
+# Examples that call C may need libraries; klangc prints what they are.
+LDLIBS ?= -lm
+EXAMPLES := hello basics phase1 phase2 gc modules phase5 phase6 phase7 phase8
 
 all: bin/klangc
 
@@ -14,7 +16,7 @@ test: bin/klangc
 	@set -e; for f in $(EXAMPLES); do \
 		echo "=== $$f ==="; \
 		./bin/klangc examples/$$f.kkg -o /tmp/klang_$$f.c >/dev/null; \
-		$(CC) $(CFLAGS) -o /tmp/klang_$$f /tmp/klang_$$f.c; \
+		$(CC) $(CFLAGS) -o /tmp/klang_$$f /tmp/klang_$$f.c $(LDLIBS); \
 		/tmp/klang_$$f; \
 	done
 

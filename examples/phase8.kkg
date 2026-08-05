@@ -1,0 +1,72 @@
+// Phase 8: calling C, without giving up the safety story.
+//
+// The rule is Rust's: declaring a C function is fine, calling one is `unsafe`.
+// You either take the obligation locally with `unsafe { ... }`, pass it up by
+// marking your own function `unsafe`, or — best — discharge it once inside a
+// safe wrapper that checks what C cannot, and never make callers think about it.
+
+import "std/fs"
+import "std/list"
+import "std/string" as str
+
+extern header "<math.h>"
+extern link "m"
+
+extern fn cSqrt(x: float) -> float = "sqrt"
+extern fn cFloor(x: float) -> float = "floor"
+
+// A safe API over an unsafe primitive: the precondition C will not check for
+// you becomes a value the caller cannot ignore.
+fn squareRoot(x: float) -> Result<float, string> {
+    if x < 0.0 {
+        return Err("no real square root of ${x}")
+    }
+    return Ok(unsafe { cSqrt(x) })
+}
+
+// Passing the obligation upward instead of discharging it.
+unsafe fn floorFast(x: float) -> float {
+    return cFloor(x)      // an unsafe fn is already an unsafe context
+}
+
+fn main() {
+    // ── C maths, wrapped ──────────────────────────────────────────────
+    match squareRoot(144.0) {
+        Ok(v)  => println("sqrt(144)  = ${v}"),
+        Err(e) => println("sqrt(144)  = ${e}"),
+    }
+    match squareRoot(-4.0) {
+        Ok(v)  => println("sqrt(-4)   = ${v}"),
+        Err(e) => println("sqrt(-4)   = ${e}"),
+    }
+    println("floor(3.7) = ${unsafe { floorFast(3.7) }}")
+
+    // ── real file I/O, and not one `unsafe` in sight ──────────────────
+    // std/fs does the unsafe work once, so using it is ordinary Klang.
+    let path = "/tmp/klang_phase8.txt"
+    let lines = ["alpha", "beta", "gamma", "delta"]
+
+    match fs.writeString(path, lines.join("\n") + "\n") {
+        Ok(n)  => println("wrote      = ${n} bytes"),
+        Err(e) => println("write      = ${e}"),
+    }
+
+    match fs.readLines(path) {
+        Ok(got) => {
+            let upper = got.map(|l| l.toUpper()).filter(|l| l.startsWith("A") || l.endsWith("A"))
+            println("read back  = ${got.len()} lines")
+            println("matching   = ${upper.join(", ")}")
+            assert(got.len() == 4, "every line written must come back")
+        }
+        Err(e) => println("read       = ${e}")
+    }
+
+    // Failure is a value, not a crash, even though the failure came from C.
+    match fs.readToString("/tmp/no-such-file-here") {
+        Ok(t)  => println("unexpected ${len(t)}"),
+        Err(e) => println("missing    = ${e}"),
+    }
+
+    println("exists     = ${fs.exists(path)}")
+    println("phase8: ok")
+}

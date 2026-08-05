@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.8)
+# Klang Language Spec (v0.9)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -389,6 +389,80 @@ Rules that keep this predictable:
 `pub fn first<T>(xs: [T]) -> Option<T>` in one module is instantiated per call site
 in another, with no boxing.
 
+## Calling C, and `unsafe`
+
+Klang can call C, and does so without abandoning anything the type system promises
+elsewhere. The rule is Rust's: **declaring a C function is fine; calling one is
+`unsafe`.**
+
+```kkg
+extern header "<math.h>"
+extern link "m"
+
+extern fn cSqrt(x: float) -> float = "sqrt"   // = "..." when the C symbol differs
+```
+
+An `extern fn` has no body — the C symbol is the body. Declaring one is harmless.
+Calling one is not, because the compiler cannot see what C will do with its
+arguments, so the call must sit in an unsafe context:
+
+```kkg
+let r = unsafe { cSqrt(2.0) }        // take the obligation here
+unsafe fn fast(x: float) -> float {  // or pass it to your callers
+    return cSqrt(x)                  // an unsafe fn is already an unsafe context
+}
+```
+
+**The point is the third option: discharge it once.** Wrap the unsafe primitive in a
+function that checks what C cannot, and hand out something that cannot be misused:
+
+```kkg
+fn squareRoot(x: float) -> Result<float, string> {
+    if x < 0.0 { return Err("no real square root of ${x}") }
+    return Ok(unsafe { cSqrt(x) })
+}
+```
+
+[std/fs](../std/fs.kkg) is the worked example. It calls `fopen`, `fgetc`, `fputs` and
+`fclose`, turns null returns and error flags into `Result`, and exports only the safe
+side — its externs are private, so callers cannot reach them even deliberately.
+Reading a file is then ordinary Klang with no `unsafe` anywhere in sight.
+
+Because `unsafe` is the only way in, `grep unsafe` over a project finds every place
+the compiler stopped vouching for you. That is the whole value of the keyword.
+
+Two details that keep the boundary honest:
+
+- **A closure body is its own context.** Creating a closure inside `unsafe { ... }`
+  does not make its body unsafe, because it may be called anywhere later.
+- **An unsafe function cannot be passed as a value**, for the same reason — the call
+  site would be invisible.
+
+### Opaque handles
+
+`extern type` declares a C pointer Klang can hold and pass back, but never open:
+
+```kkg
+extern type File
+extern fn fopen(path: string, mode: string) -> File
+
+if isNull(f) { return Err("cannot open '${path}'") }
+```
+
+There are no fields to read and no arithmetic to do, so the only thing you can do with
+a handle is give it back to C. `isNull` is the one question you may ask about it.
+
+### What crosses the boundary
+
+`int` is `int64_t`, `float` is `double`, `bool` is `bool`, and `string` is a
+NUL-terminated `char*`. Klang emits no prototypes of its own — the header you declare
+is the single source of truth for a C function's signature, so the two can never drift
+apart. `klangc` prints the libraries an `extern link` asked for.
+
+One thing to know: a `string` handed to C points into the collected heap. It stays
+alive for the duration of the call, but if C stores the pointer for later, keep a
+Klang reference alive too.
+
 ## The collector
 
 Klang ships its own garbage collector — not a dependency — because the runtime is
@@ -449,7 +523,7 @@ spawn {
 let received = ch.receive()
 ```
 
-## Implemented today (v0.8, Phase 7 complete)
+## Implemented today (v0.9, Phase 8 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -481,6 +555,17 @@ let received = ch.receive()
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 8 additions — the C boundary, with the safety story intact**
+- `extern fn`, with `= "symbol"` when the C name differs; `extern type` opaque handles
+- `extern header` and `extern link`; klangc reports the libraries to link
+- **Calling C is `unsafe`** — `unsafe { ... }` blocks and expressions, `unsafe fn`
+- Enforced end to end: a closure body does not inherit unsafe, and an unsafe
+  function cannot be passed as a value
+- `isNull` for opaque handles; opaque types have no fields to reach into
+- **`std/fs`** — real file I/O behind a fully safe `Result` API, with its externs
+  private so callers cannot reach around it
+- A function you define now shadows a builtin of the same name
 
 **Phase 7 additions — the syntax, filled in and settled**
 - **camelCase everywhere**: `toString`, `byteAt`, `fromByte`, `indexOf`, `gcCollect`,
