@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.23)
+# Klang Language Spec (v0.24)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -35,8 +35,8 @@
   to ship, no interpreter, no JavaScript. `--static` needs not even libc.
 - **You write Klang and nothing else.** Not HTML, not CSS, not JavaScript, not C.
   A web project is `src/main.kkg`: markup from [std/ui](#the-page-itself), styling
-  from [std/css](#stylesheets-in-klang), and a page shell klangc writes at build
-  time. A native program is the same file with no browser involved. Where a
+  from Tailwind — which klangc compiles for you — and a page shell klangc writes at
+  build time. A native program is the same file with no browser involved. Where a
   boundary to another language is unavoidable — syscalls, the DOM — the standard
   library crosses it **once**, behind a safe API, so that your code never does.
   Every language does this; Go's runtime is C and assembly, Rust's `std` calls
@@ -1036,7 +1036,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.23, Phase 22 complete)
+## Implemented today (v0.24, Phase 23 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -1078,16 +1078,20 @@ locking and the safepoints are only emitted when the program actually contains a
   the next request from inside the last one
 - **ui.onRoute / ui.route / ui.goTo** — the address bar is state like any other
 
-**Phase 21 additions — no HTML file, no CSS file**
-- **`std/css`** — stylesheets as values: `rule`, `media`, `at`, `set`, and the
-  properties worth having by name so a misspelling is a compile error. A selector
-  or value containing `</` is refused, since that is the one route from a
-  stylesheet back into markup.
-- **`dom.useStyle`** — installs a sheet, replacing the one it installed before
+**Phase 23 additions — one way to style a page**
+- **Styling is Tailwind, and only Tailwind.** `std/css` and the plain-CSS
+  scaffold are gone, along with `dom.useStyle`. Three ways to style a page meant
+  no way was the way, and each example had picked a different one.
+- `klangc new` has no `--css` flag any more, because there is nothing to choose
+- A web project is Klang plus Tailwind's two files — `web/input.css` and
+  `package.json` — and `make check` asserts there is nothing else in it
+- **`web run` and `web build`** are commands of their own ([tools/web](../tools/web),
+  [tools/web.cmd](../tools/web.cmd)), which is what was asked for several phases
+  before it was done
+
+**Phase 21 additions — no HTML file, hand-written CSS retired**
 - **klangc writes `index.html` itself**, and regenerates it whenever it is
-  missing. `klangc new` writes no HTML and no CSS: a fresh web project is
-  `src/main.kkg`, a README and a `.gitignore`, and `make check` asserts there is
-  nothing else in it.
+  missing, so the shell is build output rather than something to maintain.
 - A directory named after the program is its page directory whether or not it
   holds an `index.html`, since usually it will not
 - [examples/web.kkg](../examples/web.kkg) deleted its `index.html` and

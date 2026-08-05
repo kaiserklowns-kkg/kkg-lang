@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "//": "Only Tailwind lives here. Klang itself needs no package manager; this exists so that `klangc web build` can compile the examples' stylesheets.",
+  "devDependencies": {
+    "tailwindcss": "^4",
+    "@tailwindcss/cli": "^4"
+  }
+}

@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.23 — Phase 22 complete
+## Status: v0.24 — Phase 23 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -78,7 +78,6 @@ aspirational.
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
   [std/http](std/http.kkg), [std/json](std/json.kkg), [std/ui](std/ui.kkg),
-  [std/css](std/css.kkg),
   [std/dom](std/dom.kkg), [std/fetch](std/fetch.kkg).
 - **WASM** — Klang compiles to WASM and runs there correctly. Every example passes
   under Node except the two that need POSIX sockets or threads. This is what the
@@ -92,9 +91,10 @@ aspirational.
   Klang — a component is a function returning a `Node`, handlers are closures,
   and `refresh` diffs the DOM rather than rebuilding it, so a live `<input>`
   keeps what is being typed into it. Escaping is structural.
-  [std/css](std/css.kkg) does the same for styling, with property names as
-  functions so a misspelling is a compile error. klangc writes the page shell at
-  build time. `make check` asserts a fresh project contains nothing but Klang.
+- **Styling is Tailwind** — one way, not three. `klangc new` scaffolds it and
+  `klangc web run` compiles it, with `@source` pointed at `src/**/*.kkg` so the
+  class names Klang writes into string literals are found. That is checked by
+  compiling Tailwind for real in `make check`, not asserted.
 - **Frontend plumbing** — `js fn` declares a function whose body is JavaScript and
   lets the compiler marshal the boundary; `export fn` makes a Klang function
   callable from JavaScript. [std/dom](std/dom.kkg) covers text, attributes,
@@ -102,13 +102,12 @@ aspirational.
   HTTP, taking closures and requiring an error handler on every call.
   [examples/web.kkg](examples/web.kkg) is a working application — a form, a keyed
   list, routing, state persisted as JSON, and a sync that posts it — written
-  entirely in Klang, and `make test-web` drives all of it against a stub DOM and a
-  stub server.
-- **Stylesheets** — plain CSS is a static file and always worked. Tailwind is
-  first-class: `klangc new --css tailwind` scaffolds it and `klangc web run`
-  compiles it, with `@source` pointed at `src/**/*.kkg` so the class names Klang
-  writes into string literals are actually found. Any other pipeline works by
-  producing `style.css` itself.
+  entirely in Klang, and `make test-web` drives all of it against a stub DOM and
+  a stub server.
+- **Full stack, tested as one** — [examples/fullstack](examples/fullstack) is a
+  REST API as a native binary and a page as WebAssembly, both Klang.
+  `make test-fullstack` drives the page against the running server over real
+  HTTP, with nothing stubbed between them.
 - **Native executables** — `klangc build` produces a binary the OS runs, linked
   against nothing but the C library. `--static` needs not even that; `--debug`
   keeps symbols. C is the intermediate form, kept in `.klang/` to be read rather

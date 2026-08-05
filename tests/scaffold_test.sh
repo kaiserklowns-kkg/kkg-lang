@@ -40,32 +40,29 @@ ${CC:-cc} -std=c99 -Wall -Wextra -Werror -O1 -c demo-server/out.c -o /dev/null \
   || fail "the server template's generated C is not warning-clean"
 echo "  server  builds"
 
-# ── a web project is Klang and nothing else ───────────────────────────
+# ── the web scaffold: Klang, plus Tailwind's two files ────────────────
 #
-# The whole point: no .html, no .css, no .js, no .c. The markup is std/ui and
-# the styling std/css; klangc writes the page shell at build time.
+# The markup is std/ui and the styling is Tailwind. Tailwind is a separate
+# compiler with its own input file, so a web project has exactly two files that
+# are not Klang — input.css and package.json — and nothing else.
 "$KLANGC" new demo-web > /dev/null
-strays=$(find demo-web -type f ! -name "*.kkg" ! -name "README.md" ! -name ".gitignore")
-[ -z "$strays" ] || fail "a fresh web project should be Klang only, but has:
+strays=$(find demo-web -type f ! -name "*.kkg" ! -name "README.md" ! -name ".gitignore" \
+                       ! -name "input.css" ! -name "package.json" ! -name "index.html")
+[ -z "$strays" ] || fail "a fresh web project has files it should not:
 $strays"
 grep -q 'std/ui' demo-web/src/main.kkg || fail "the template does not build its markup in Klang"
-grep -q 'std/css' demo-web/src/main.kkg || fail "the template does not build its styling in Klang"
-echo "  web     a fresh project is .kkg and nothing else"
-
-# ── tailwind: the scaffold has to point Tailwind at the Klang source ──
-"$KLANGC" new demo-tw --css tailwind > /dev/null
-grep -q '@import "tailwindcss"' demo-tw/web/input.css || fail "tailwind input.css is not tailwind"
-grep -q 'src/\*\*/\*\.kkg' demo-tw/web/input.css \
+grep -q '@import "tailwindcss"' demo-web/web/input.css || fail "input.css is not tailwind"
+grep -q 'src/\*\*/\*\.kkg' demo-web/web/input.css \
   || fail "tailwind would not see class names written in Klang strings"
-grep -q '"tailwindcss"' demo-tw/package.json || fail "tailwind is not in package.json"
-grep -q 'web/style.css' demo-tw/.gitignore || fail "generated css is not ignored"
-echo "  css     plain and tailwind scaffolded"
+grep -q '"tailwindcss"' demo-web/package.json || fail "tailwind is not in package.json"
+grep -q 'web/style.css' demo-web/.gitignore || fail "generated css is not ignored"
+echo "  web     scaffolded: Klang, and Tailwind pointed at it"
 
 # Actually compiling Tailwind means downloading it, so it is opt-in rather than
 # something every `make check` does. KLANG_TEST_TAILWIND=1 turns it on.
 if [ "${KLANG_TEST_TAILWIND:-}" = 1 ] && command -v emcc > /dev/null; then
-  (cd demo-tw && "$KLANGC" web build > /dev/null) || fail "the tailwind project did not build"
-  grep -q "rounded-full" demo-tw/web/style.css \
+  (cd demo-web && "$KLANGC" web build > /dev/null) || fail "the web project did not build"
+  grep -q "rounded-full" demo-web/web/style.css \
     || fail "a class used only in src/main.kkg did not reach the stylesheet"
   echo "  css     tailwind compiled, and it read the .kkg source"
 fi
@@ -88,7 +85,7 @@ cat > drive.js <<EOF
 // Klang, so this also checks that std/ui and its diff work in the template
 // everyone starts from.
 const { install } = require("$HERE/tests/stub_dom.js");
-const { app, q, byText, styleText } = install();
+const { app, q, byText } = install();
 const Module = require(process.argv[2]);
 setTimeout(() => {
   const want = (got, exp, what) => {
@@ -98,14 +95,13 @@ setTimeout(() => {
     }
   };
   want(q("h1") !== null, true, "the heading was built by Klang");
-  want(styleText().includes("max-width:32rem;"), true, "the styling was built by Klang");
+  
   want(q("#count").textContent, "0 clicks", "first render");
   app.fire("click", byText("button", "click me"));
   app.fire("click", byText("button", "click me"));
   want(q("#count").textContent, "2 clicks", "after two clicks");
-  console.log("  web     runs — markup and styling both Klang, and the button counts");
+  console.log("  web     runs, and the button counts");
 }, 200);
 EOF
-# The build output lives under .klang/, because the project has no web/ of its
-# own — it has no non-Klang files at all.
-"$JS" drive.js "$WORK/demo-web/.klang/main/app.js"
+# The build output lives in web/, beside the Tailwind input.
+"$JS" drive.js "$WORK/demo-web/web/app.js"

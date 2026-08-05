@@ -8,7 +8,6 @@
 //     klangc web run examples/web.kkg
 
 import "std/ui"
-import "std/css"
 import "std/dom"
 import "std/fetch"
 import "std/list"
@@ -31,18 +30,27 @@ let mut message = ""
 const STORE_KEY = "klang.tasks"
 
 // ── the page ──────────────────────────────────────────────────────────
+//
+// Styling is Tailwind. The class names live in these string literals, and
+// web/input.css points Tailwind at this file with @source, which is what makes
+// them reach the stylesheet.
+
+const BTN = "rounded border border-gray-400/50 px-3 py-1.5 hover:bg-gray-500/10"
+const ICON = "px-2 opacity-60 hover:opacity-100"
+const ROW = "flex items-center gap-2 border-b border-gray-500/20 px-2 py-1.5 last:border-0"
 
 fn taskRow(t: Task) -> ui.Node {
     // A key tells the diff which row is which, so deleting from the middle of the
     // list moves nothing else.
     return ui.keyed(ui.with(ui.item([
         ui.with(ui.button(if t.done { "☑" } else { "☐" }, || toggle(t.id)),
-                [ui.class("mark"), ui.title("toggle")]),
+                [ui.class(ICON), ui.title("toggle")]),
         // A text node is escaped on the way in. There is no way to forget.
-        ui.tag("span", t.title),
+        ui.with(ui.tag("span", t.title),
+                [ui.class(if t.done { "flex-1 opacity-45 line-through" } else { "flex-1" })]),
         ui.with(ui.button("×", || removeTask(t.id)),
-                [ui.class("delete"), ui.title("delete")]),
-    ]), [ui.class(if t.done { "done" } else { "" })]), "${t.id}")
+                [ui.class(ICON), ui.title("delete")]),
+    ]), [ui.class(ROW)]), "${t.id}")
 }
 
 fn visible() -> [Task] {
@@ -57,47 +65,57 @@ fn visible() -> [Task] {
 
 fn filterLink(name: string, label: string) -> ui.Node {
     let target = if name == "all" { "#" } else { "#${name}" }
+    let base = "rounded px-2 py-0.5 no-underline "
     return ui.with(ui.link(label, target),
-                   [ui.class(if filter == name { "on" } else { "" })])
+                   [ui.class(base + if filter == name { "bg-gray-500/20" }
+                                    else { "opacity-60" })])
 }
 
 fn listView() -> ui.Node {
     let shown = visible()
+    let box = "mt-1 rounded border border-gray-500/30"
     if shown.len() == 0 {
-        return ui.list([ui.with(ui.item([ui.text("nothing here")]), [ui.class("empty")])])
+        return ui.with(ui.list([
+            ui.with(ui.item([ui.text("nothing here")]),
+                    [ui.class("justify-center px-2 py-1.5 italic opacity-50")]),
+        ]), [ui.class(box)])
     }
-    return ui.list(list.map(shown, taskRow))
+    return ui.with(ui.list(list.map(shown, taskRow)), [ui.class(box)])
 }
 
 fn view() -> ui.Node {
     let left = list.count(tasks, |t| !t.done)
     return ui.col([
-        ui.h1("Klang in the browser"),
+        ui.with(ui.h1("Klang in the browser"), [ui.class("text-2xl font-semibold")]),
         ui.with(ui.line("Markup, styling, state, routing and the network are "
                       + "examples/web.kkg — Klang values, compiled to WebAssembly."),
-                [ui.class("sub")]),
+                [ui.class("mt-1 text-sm opacity-70")]),
 
-        ui.onSubmit(ui.form([
-            ui.onKey(ui.input([ui.id("entry"),
-                               ui.placeholder("something to do — esc to clear"),
-                               ui.attr("autocomplete", "off")]),
-                     |key| { if key == "Escape" { clearEntry() } }),
-            ui.tag("button", "add"),
-        ]), addTask),
+        ui.with(ui.onSubmit(ui.form([
+            ui.with(ui.onKey(ui.input([ui.id("entry"),
+                                       ui.placeholder("something to do — esc to clear"),
+                                       ui.attr("autocomplete", "off")]),
+                             |key| { if key == "Escape" { clearEntry() } }),
+                    [ui.class("flex-1 rounded border border-gray-400/50 bg-transparent "
+                            + "px-3 py-1.5")]),
+            ui.with(ui.tag("button", "add"), [ui.class(BTN)]),
+        ]), addTask), [ui.class("mt-6 flex gap-2")]),
 
-        ui.nav([filterLink("all", "all"), filterLink("todo", "todo"),
-                filterLink("done", "done")]),
+        ui.with(ui.nav([filterLink("all", "all"), filterLink("todo", "todo"),
+                        filterLink("done", "done")]),
+                [ui.class("mt-3 flex gap-1 text-sm")]),
 
         listView(),
 
         ui.with(ui.div([
             ui.tag("span", "${left} of ${tasks.len()} left"),
-            ui.with(ui.tag("span", message), [ui.class("grow")]),
-            ui.span([
-                ui.button("sync", sync),
-                ui.button("clear done", clearDone),
-            ]),
-        ]), [ui.class("row")]),
+            ui.with(ui.tag("span", message), [ui.class("flex-1 text-center")]),
+            ui.with(ui.span([
+                ui.with(ui.button("sync", sync), [ui.class(BTN)]),
+                ui.with(ui.button("clear done", clearDone), [ui.class(BTN)]),
+            ]), [ui.class("flex gap-2")]),
+        ]), [ui.id("status"),
+             ui.class("mt-3 flex items-center gap-2 text-sm opacity-75")]),
     ])
 }
 
@@ -229,24 +247,6 @@ fn save() {
     dom.store(STORE_KEY, toJson())
 }
 
-// ── styling ───────────────────────────────────────────────────────────
-//
-// css.base() is the forty lines every page needs to look like a page. What is
-// left here is what is actually particular to this one.
-
-fn styles() -> [css.Block] {
-    return css.with(css.base(), [
-        css.rule("nav", [css.display("flex"), css.gap(".4rem"),
-                         css.fontSize(".85rem"), css.marginBottom(".8rem")]),
-        css.rule("nav a", [css.padding(".2rem .6rem"), css.radius(".3rem"),
-                           css.textDecoration("none"), css.opacity(".6")]),
-        css.rule("nav a.on", [css.opacity("1"), css.background("#8883")]),
-        css.media("(max-width: 30rem)", [
-            css.rule("body", [css.margin("1.5rem auto")]),
-            css.rule("h1", [css.fontSize("1.2rem")]),
-        ]),
-    ])
-}
 
 // Readable from JavaScript, so the host page can ask Klang how it is doing.
 export fn remaining() -> int {
@@ -256,7 +256,6 @@ export fn remaining() -> int {
 fn main() {
     load()
     dom.setTitle("Klang in the browser")
-    dom.useStyle(css.sheet(styles()))
 
     // The address bar is state like any other: set it, then re-render.
     ui.onRoute(|r| {

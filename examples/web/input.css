@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+/* Klang builds markup in string literals, so Tailwind is pointed at the source
+   as well as the page. Without these it would find nothing and emit nothing. */
+@source "./index.html";
+@source "../web.kkg";

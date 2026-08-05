@@ -43,8 +43,8 @@ const submitForm = () => app.fire("submit", all().find((n) => n.tag === "form"))
 const click = (label) => app.fire("click", byText("button", label));
 const clickIn = (row, label) =>
   app.fire("click", row.children.find((c) => c.textContent.trim() === label));
-// `.row` is the class std/css's base sheet gives a status line.
-const status = () => all().find((n) => n.classes.has("row")).textContent;
+// A stable id, so the test is not coupled to whatever the styling calls it.
+const status = () => q("#status").textContent;
 
 // The page talks to the server, so waiting means waiting for a round trip. Poll
 // rather than sleep a fixed time, so the test is neither flaky nor slow.
@@ -86,8 +86,8 @@ const Module = require(path);
   // ── toggling ────────────────────────────────────────────────────────
   const third = rows()[2];
   clickIn(third, "☐");
-  await until("the update round trip", async () => true);
-  await until("the server records it", () => rows()[2].classes.has("done"), 3000);
+  const struck = (r) => r.children.some((c) => c.classes.has("line-through"));
+  await until("the row shows as done", () => struck(rows()[2]));
   const afterToggle = await (await fetch(`${API}/tasks`)).json();
   check("the server thinks so as well", afterToggle[2].done, true);
 

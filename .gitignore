@@ -11,3 +11,10 @@ examples/web/app.js
 examples/web/app.wasm
 examples/fullstack/api
 examples/fullstack/api.exe
+examples/fullstack/node_modules/
+examples/fullstack/web/style.css
+examples/fullstack/web/app.js
+examples/fullstack/web/app.wasm
+node_modules/
+examples/web/style.css
+examples/fullstack/bun.lock

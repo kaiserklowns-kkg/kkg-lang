@@ -218,18 +218,6 @@ js fn jsUiListen(root: int, event: string) {
 
 // ── styling, and the address bar ──────────────────────────────────────
 
-// A stylesheet built by std/css, put on the page. Called again with the same id
-// it replaces what was there, so a theme can change without piling up <style>
-// elements.
-js fn jsUseStyle(id: string, text: string) {
-    var el = document.getElementById(id)
-    if (el === null) {
-        el = document.createElement("style")
-        el.id = id
-        document.head.appendChild(el)
-    }
-    el.textContent = text
-}
 
 // The address bar is not an element, so it gets its own listener.
 js fn jsOnHash(handler: string) {
@@ -334,12 +322,7 @@ pub fn onHashChange(handler: string) { unsafe { jsOnHash(handler) } }
 
 // The same, for a list of siblings going into a container that already exists.
 
-// Put a stylesheet on the page — normally `css.sheet([...])`. There is no .css
-// file in the project unless you want one.
-pub fn useStyle(text: string) { unsafe { jsUseStyle("klang-style", text) } }
 
-// A second sheet, kept separate so it can be replaced on its own.
-pub fn useStyleNamed(id: string, text: string) { unsafe { jsUseStyle(id, text) } }
 
 // ── the node handles std/ui builds on ─────────────────────────────────
 

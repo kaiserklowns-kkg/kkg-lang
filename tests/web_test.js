@@ -21,7 +21,7 @@ if (!path) {
 }
 
 const { install } = require("./stub_dom.js");
-const { app, q, all, byText, store, navigate, styleText } = install();
+const { app, q, all, byText, store, navigate } = install();
 
 // A stub server, so the network path is exercised rather than assumed. Both
 // outcomes are scripted: `reply` decides what the next request gets.
@@ -67,8 +67,8 @@ const submitForm = () => app.fire("submit", all().find((n) => n.tag === "form"))
 const click = (label) => app.fire("click", byText("button", label));
 const clickIn = (row, label) =>
   app.fire("click", row.children.find((c) => c.textContent.trim() === label));
-// `.row` is what std/css's base sheet calls a status line.
-const status = () => all().find((n) => n.classes.has("row")).textContent;
+// A stable id, so the test is not coupled to whatever the styling calls it.
+const status = () => q("#status").textContent;
 
 const Module = require(path);
 
@@ -83,12 +83,10 @@ setTimeout(async () => {
   check("the input exists", q("#entry") !== null, true);
   contains("main logged", logs.join("\n"), "klang: ready, 3 tasks");
 
-  // ── the stylesheet is Klang too ─────────────────────────────────────
-  const sheet = styleText();
-  contains("a plain rule", sheet, "max-width:34rem;");
-  contains("a pseudo-class", sheet, "button:hover {");
-  contains("a media query", sheet, "@media (max-width: 30rem) {");
-  check("one style element", document.head.children.length, 1);
+  // Styling is Tailwind, compiled to a .css file at build time rather than
+  // injected at runtime, so there is nothing here for this test to look at. That
+  // the class names in the .kkg reach the stylesheet is checked by the scaffold
+  // test, which compiles Tailwind for real.
 
   // ── first load ──────────────────────────────────────────────────────
   check("three rows", rows().length, 3);

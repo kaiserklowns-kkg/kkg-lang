@@ -9,7 +9,6 @@
 // browser tab does not show something different.
 
 import "std/ui"
-import "std/css"
 import "std/dom"
 import "std/fetch"
 import "std/json"
@@ -107,40 +106,55 @@ fn checkHealth() {
 }
 
 // ── the page ──────────────────────────────────────────────────────────
+//
+// Styling is Tailwind. The class names are in these string literals, and
+// web/input.css points Tailwind at this file with @source, which is what makes
+// them reach the stylesheet.
+
+const BTN = "rounded border border-gray-400/50 px-3 py-1.5 hover:bg-gray-500/10"
+const ICON = "px-2 opacity-60 hover:opacity-100"
 
 fn row(t: Task) -> ui.Node {
     return ui.keyed(ui.with(ui.item([
-        ui.button(if t.done { "☑" } else { "☐" }, || toggle(t)),
-        ui.tag("span", t.title),
-        ui.button("×", || removeTask(t.id)),
-    ]), [ui.class(if t.done { "done" } else { "" })]), "${t.id}")
+        ui.with(ui.button(if t.done { "☑" } else { "☐" }, || toggle(t)), [ui.class(ICON)]),
+        ui.with(ui.tag("span", t.title),
+                [ui.class(if t.done { "flex-1 opacity-45 line-through" } else { "flex-1" })]),
+        ui.with(ui.button("×", || removeTask(t.id)), [ui.class(ICON)]),
+    ]), [ui.class("flex items-center gap-2 border-b border-gray-500/20 px-2 py-1.5 "
+                + "last:border-0")]), "${t.id}")
 }
 
 fn view() -> ui.Node {
     let left = list.count(tasks, |t| !t.done)
     return ui.col([
-        ui.h1("Klang, end to end"),
+        ui.with(ui.h1("Klang, end to end"), [ui.class("text-2xl font-semibold")]),
         ui.with(ui.line("This page is WebAssembly. The API it talks to is a native "
                       + "binary. Both are Klang, and neither knows the other is."),
-                [ui.class("sub")]),
+                [ui.class("mt-1 text-sm opacity-70")]),
 
-        ui.onSubmit(ui.form([
-            ui.input([ui.id("entry"), ui.placeholder("something to do"),
-                      ui.attr("autocomplete", "off")]),
-            ui.tag("button", "add"),
-        ]), add),
+        ui.with(ui.onSubmit(ui.form([
+            ui.with(ui.input([ui.id("entry"), ui.placeholder("something to do"),
+                              ui.attr("autocomplete", "off")]),
+                    [ui.class("flex-1 rounded border border-gray-400/50 bg-transparent "
+                            + "px-3 py-1.5")]),
+            ui.with(ui.tag("button", "add"), [ui.class(BTN)]),
+        ]), add), [ui.class("mt-6 flex gap-2")]),
 
-        if tasks.len() == 0 {
-            ui.list([ui.with(ui.item([ui.text("nothing here")]), [ui.class("empty")])])
+        ui.with(if tasks.len() == 0 {
+            ui.list([ui.with(ui.item([ui.text("nothing here")]),
+                             [ui.class("justify-center px-2 py-1.5 italic opacity-50")])])
         } else {
             ui.list(list.map(tasks, row))
-        },
+        }, [ui.class("mt-3 rounded border border-gray-500/30")]),
 
         ui.with(ui.div([
             ui.tag("span", "${left} of ${tasks.len()} left"),
-            ui.with(ui.tag("span", if busy { "…" } else { status }), [ui.class("grow")]),
-            ui.span([ui.button("reload", reload), ui.button("health", checkHealth)]),
-        ]), [ui.class("row")]),
+            ui.with(ui.tag("span", if busy { "…" } else { status }),
+                    [ui.class("flex-1 text-center")]),
+            ui.with(ui.span([ui.with(ui.button("reload", reload), [ui.class(BTN)]),
+                             ui.with(ui.button("health", checkHealth), [ui.class(BTN)])]),
+                    [ui.class("flex gap-2")]),
+        ]), [ui.id("status"), ui.class("mt-3 flex items-center gap-2 text-sm opacity-75")]),
     ])
 }
 
@@ -151,7 +165,6 @@ export fn taskCount() -> int {
 
 fn main() {
     dom.setTitle("Klang, end to end")
-    dom.useStyle(css.sheet(css.base()))
     ui.mount("#app", view)
     reload()
 }
