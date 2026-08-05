@@ -1,0 +1,130 @@
+// A working HTTP server, in Klang.
+//
+// Everything underneath is already built: sockets come from std/net (which does the
+// unsafe C work once), request parsing from std/http, text from std/string. Nothing
+// in this file is unsafe, and nothing in it is about memory.
+//
+//   klangc examples/server.kkg -o server.c
+//   gcc -O2 -o server server.c -lpthread
+//   ./server 8080
+
+import "std/net"
+import "std/http"
+import "std/list"
+import "std/string" as str
+
+const PORT = 8080
+const MAX_REQUESTS = 8      // the demo serves this many, then stops
+
+fn escape(s: string) -> string {
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+fn jsonOf(pairs: [string]) -> string {
+    return "{" + pairs.join(",") + "}"
+}
+
+fn handle(req: http.Request) -> http.Response {
+    if req.path == "/" {
+        return http.html(
+            "<!doctype html><meta charset=utf-8><title>Klang</title>"
+          + "<h1>Served by Klang</h1>"
+          + "<p>Try <a href=\"/hello?name=world\">/hello?name=world</a>"
+          + " or <a href=\"/stats\">/stats</a>.</p>")
+    }
+
+    if req.path == "/hello" {
+        let mut name = "there"
+        for pair in req.query.split("&") {
+            let eq = pair.indexOf("=")
+            if eq > 0 && pair.substr(0, eq) == "name" {
+                name = pair.substr(eq + 1, pair.len())
+            }
+        }
+        return http.json(jsonOf(["\"greeting\":\"hello, ${escape(name)}\""]))
+    }
+
+    if req.path == "/stats" {
+        let headerCount = req.headers.keys().len()
+        return http.json(jsonOf([
+            "\"method\":\"${req.method}\"",
+            "\"headers\":${headerCount}",
+            "\"heapBytes\":${gcHeap()}",
+        ]))
+    }
+
+    if req.path == "/echo" {
+        return http.ok(req.body)
+    }
+
+    return http.notFound()
+}
+
+// A client, so the example proves itself rather than needing curl. It runs on
+// another thread while the server accepts — which is the point of having both.
+fn request(port: int, path: string) -> string {
+    match net.connectTo(127, 0, 0, 1, port) {
+        Err(e) => { return "connect failed: ${e}" }
+        Ok(c) => {
+            net.writeAll(c, "GET ${path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            let mut reply = ""
+            match net.readSome(c) {
+                Ok(text) => { reply = text }
+                Err(e)   => { reply = "read failed: ${e}" }
+            }
+            net.closeConn(c)
+            return reply
+        }
+    }
+}
+
+fn bodyOf(reply: string) -> string {
+    let cut = reply.indexOf("\r\n\r\n")
+    if cut < 0 {
+        return ""
+    }
+    return reply.substr(cut + 4, reply.len())
+}
+
+fn main() {
+    match net.listenOn(PORT) {
+        Err(e) => println("cannot start: ${e}")
+        Ok(listener) => {
+            println("klang http server on http://127.0.0.1:${PORT}")
+
+            let paths = ["/", "/hello?name=Klang", "/stats", "/missing"]
+            let client = spawn requestAll(PORT, paths)
+
+            let mut served = 0
+            while served < paths.len() {
+                match net.acceptOne(listener) {
+                    Err(e) => println("accept: ${e}")
+                    Ok(conn) => {
+                        http.serveOne(conn, handle)
+                        served += 1
+                    }
+                }
+            }
+            net.closeListener(listener)
+
+            let replies = await client
+            for i in 0..replies.len() {
+                let body = bodyOf(replies[i])
+                println("${paths[i]} -> ${body.len()} bytes")
+            }
+            assert(replies.len() == 4, "every request must come back")
+            assert(bodyOf(replies[1]) == "{\"greeting\":\"hello, Klang\"}", "JSON route")
+            assert(bodyOf(replies[3]).startsWith("not found"), "unknown paths are 404")
+            println("served ${served} requests")
+            println("server: ok")
+        }
+    }
+}
+
+fn requestAll(port: int, paths: [string]) -> [string] {
+    let mut out: [string] = []
+    for p in paths {
+        push(out, request(port, p))
+    }
+    return out
+}

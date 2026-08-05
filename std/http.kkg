@@ -1,0 +1,107 @@
+// std/http — just enough HTTP/1.1 to serve requests.
+//
+// Pure Klang on top of std/net and std/string. No unsafe here at all: std/net
+// already discharged that, so this module is ordinary code.
+
+import "std/net"
+import "std/string" as str
+
+pub struct Request {
+    method: string,
+    path: string,
+    query: string,
+    headers: {string: string},
+    body: string,
+}
+
+pub struct Response {
+    status: int,
+    contentType: string,
+    body: string,
+}
+
+pub fn ok(body: string) -> Response {
+    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: body }
+}
+pub fn html(body: string) -> Response {
+    return Response { status: 200, contentType: "text/html; charset=utf-8", body: body }
+}
+pub fn json(body: string) -> Response {
+    return Response { status: 200, contentType: "application/json", body: body }
+}
+pub fn notFound() -> Response {
+    return Response { status: 404, contentType: "text/plain; charset=utf-8", body: "not found\n" }
+}
+pub fn badRequest(why: string) -> Response {
+    return Response { status: 400, contentType: "text/plain; charset=utf-8", body: "${why}\n" }
+}
+
+fn reasonFor(status: int) -> string {
+    if status == 200 { return "OK" }
+    if status == 400 { return "Bad Request" }
+    if status == 404 { return "Not Found" }
+    if status == 500 { return "Internal Server Error" }
+    return "OK"
+}
+
+pub fn parseRequest(raw: string) -> Result<Request, string> {
+    let cut = raw.indexOf("\r\n\r\n")
+    let mut head = raw
+    let mut body = ""
+    if cut >= 0 {
+        head = raw.substr(0, cut)
+        body = raw.substr(cut + 4, raw.len())
+    }
+
+    let lines = head.split("\r\n")
+    if lines.len() == 0 || lines[0].len() == 0 {
+        return Err("empty request")
+    }
+    let parts = lines[0].split(" ")
+    if parts.len() < 2 {
+        return Err("malformed request line")
+    }
+    let target = parts[1]
+    let q = target.indexOf("?")
+    let mut path = target
+    let mut query = ""
+    if q >= 0 {
+        path = target.substr(0, q)
+        query = target.substr(q + 1, target.len())
+    }
+
+    let mut headers: {string: string} = {}
+    for i in 1..lines.len() {
+        let line = lines[i]
+        let colon = line.indexOf(":")
+        if colon > 0 {
+            let name = line.substr(0, colon).toLower()
+            headers[name] = line.substr(colon + 1, line.len()).trim()
+        }
+    }
+    return Ok(Request { method: parts[0], path: path, query: query, headers: headers, body: body })
+}
+
+pub fn render(r: Response) -> string {
+    return "HTTP/1.1 ${r.status} ${reasonFor(r.status)}\r\n"
+         + "Content-Type: ${r.contentType}\r\n"
+         + "Content-Length: ${r.body.len()}\r\n"
+         + "Connection: close\r\n"
+         + "\r\n"
+         + r.body
+}
+
+// Reads one request off the connection, hands it to `handle`, writes the reply.
+pub fn serveOne(c: net.Conn, handle: fn(Request) -> Response) {
+    match net.readSome(c) {
+        Ok(raw) => {
+            let reply = match parseRequest(raw) {
+                Ok(req) => handle(req),
+                Err(e)  => badRequest(e),
+            }
+            net.writeAll(c, render(reply))
+        }
+        Err(_e) => { }
+    }
+    net.closeConn(c)
+}

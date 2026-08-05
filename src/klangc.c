@@ -237,11 +237,18 @@ static Token lex_next(Lexer *lx) {
                 int esc = lx_adv(lx);
                 switch (esc) {
                     case 'n': buf[0] = '\n'; break;
+                    case 'r': buf[0] = '\r'; break;
                     case 't': buf[0] = '\t'; break;
+                    case '0': buf[0] = '\0'; break;
                     case '"': buf[0] = '"'; break;
+                    case '\'': buf[0] = '\''; break;
                     case '$': buf[0] = '$'; break;
                     case '\\': buf[0] = '\\'; break;
-                    default: buf[0] = (char)esc; break;
+                    /* Silently dropping the backslash turns a typo into a wrong
+                       string that looks right, so an unknown escape is an error. */
+                    default:
+                        fail(line, "'\\%c' is not an escape — use \\n \\r \\t \\0 \\\" \\' "
+                                   "\\\\ or \\$, or write the backslash as \\\\", (char)esc);
                 }
             } else buf[0] = (char)ch;
             sb_append(&sb, buf);
@@ -2300,6 +2307,29 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         }
         return ty_int();
     }
+    /* Reading and writing raw bytes through a C pointer. This is the sharp edge the
+       `unsafe` keyword exists for: it is how a Klang program builds a C struct — a
+       sockaddr, say — that no safe construct can express. */
+    if (!shadowed && (strcmp(e->sval, "pokeByte") == 0 || strcmp(e->sval, "peekByte") == 0)) {
+        bool poking = strcmp(e->sval, "pokeByte") == 0;
+        int want = poking ? 3 : 2;
+        if (e->args.count != want)
+            fail(e->line, "'%s' takes %d arguments: the pointer, an offset%s",
+                 e->sval, want, poking ? ", and the byte" : "");
+        if (g_unsafe_depth == 0)
+            fail(e->line, "'%s' reads or writes raw memory, so it is unsafe — "
+                          "wrap it in 'unsafe { ... }' inside a function that knows "
+                          "the pointer and offset are valid", e->sval);
+        Type *pt = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
+        StructDecl *sd = pt->kind == TY_NAMED ? find_mono_struct(ty_mangle(pt)) : NULL;
+        if (!sd || !sd->is_opaque)
+            fail(e->line, "'%s' needs an 'extern type' pointer, got %s", e->sval, ty_str(pt));
+        for (int i = 1; i < want; i++) {
+            Type *at = tc_expr(VEC_PTR(&e->args, i, Expr), sc, ty_int());
+            if (at->kind != TY_INT) fail(e->line, "'%s' needs int offsets and bytes", e->sval);
+        }
+        return poking ? ty_void() : ty_int();
+    }
     if (!shadowed && strcmp(e->sval, "isNull") == 0) {
         if (e->args.count != 1) fail(e->line, "'isNull' takes exactly 1 argument");
         Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
@@ -3235,12 +3265,17 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
         case EX_FLOAT: sb_appendf(out, "%.17g", e->fval); break;
         case EX_BOOL: sb_append(out, e->bval ? "true" : "false"); break;
         case EX_STRING:
+            /* Anything that is not plainly printable goes out as an octal escape,
+               so no byte can terminate or corrupt the C literal. */
             sb_append(out, "\"");
             for (const char *p = e->sval; *p; p++) {
-                if (*p == '"' || *p == '\\') sb_appendf(out, "\\%c", *p);
-                else if (*p == '\n') sb_append(out, "\\n");
-                else if (*p == '\t') sb_append(out, "\\t");
-                else { char b[2] = {*p, 0}; sb_append(out, b); }
+                unsigned char ch = (unsigned char)*p;
+                if (ch == '"' || ch == '\\') sb_appendf(out, "\\%c", ch);
+                else if (ch == '\n') sb_append(out, "\\n");
+                else if (ch == '\r') sb_append(out, "\\r");
+                else if (ch == '\t') sb_append(out, "\\t");
+                else if (ch < 0x20 || ch == 0x7f) sb_appendf(out, "\\%03o", ch);
+                else { char b[2] = {(char)ch, 0}; sb_append(out, b); }
             }
             sb_append(out, "\"");
             break;
@@ -3499,6 +3534,15 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                                : strcmp(e->sval, "wrapSub") == 0 ? "klang_wrap_sub"
                                                                  : "klang_wrap_mul";
                 sb_appendf(out, "%s(", cn);
+                for (int i = 0; i < e->args.count; i++) {
+                    if (i) sb_append(out, ", ");
+                    cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
+                }
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "pokeByte") == 0 || strcmp(e->sval, "peekByte") == 0) {
+                sb_appendf(out, "klang_%s(", strcmp(e->sval, "pokeByte") == 0 ? "poke" : "peek");
                 for (int i = 0; i < e->args.count; i++) {
                     if (i) sb_append(out, ", ");
                     cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
@@ -4261,6 +4305,8 @@ static const char *RUNTIME =
     "    const char *hit = strstr(s, needle);\n"
     "    return hit ? (int64_t)(hit - s) : -1;\n"
     "}\n"
+    "void klang_poke(void *p, int64_t off, int64_t v) { ((unsigned char *)p)[off] = (unsigned char)v; }\n"
+    "int64_t klang_peek(void *p, int64_t off) { return (int64_t)((unsigned char *)p)[off]; }\n"
     "void klang_no_key(void) {\n"
     "    fprintf(stderr, \"klang: no such key in map\\n\");\n"
     "    exit(1);\n"
@@ -4718,7 +4764,7 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.11 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.12 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -4774,6 +4820,15 @@ static void codegen(SB *sb) {
         for (int i = 0; i < g_mono_tasks.count; i++)
             emit_task(VEC_PTR(&g_mono_tasks, i, Type), sb);
     }
+
+    /* Constants are globals, declared here so that anything emitted later — a
+       closure body included — can refer to one. They are filled in at startup. */
+    for (int i = 0; i < g_decls.count; i++) {
+        Decl *d = vec_get(&g_decls, i);
+        if (d->kind != DECL_CONST) continue;
+        sb_appendf(sb, "%s %s;\n", c_type(d->c->type), d->c->mangled);
+    }
+    sb_append(sb, "\n");
 
     /* Closures are lifted before anything is written, so their environments and
        declarations precede every body that builds or calls one. */
@@ -4840,11 +4895,6 @@ static void codegen(SB *sb) {
     for (int i = 0; i < g_decls.count; i++)
         if (((Decl *)vec_get(&g_decls, i))->kind == DECL_CONST) nconsts++;
     if (nconsts) {
-        for (int i = 0; i < g_decls.count; i++) {
-            Decl *d = vec_get(&g_decls, i);
-            if (d->kind != DECL_CONST) continue;
-            sb_appendf(sb, "%s %s;\n", c_type(d->c->type), d->c->mangled);
-        }
         sb_append(sb, "void _kinit_consts(void) {\n");
         for (int i = 0; i < g_decls.count; i++) {
             Decl *d = vec_get(&g_decls, i);
@@ -5017,7 +5067,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.11)\n\n"
+        printf("klangc — Klang compiler (0.12)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -5025,7 +5075,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.11.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.12.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";

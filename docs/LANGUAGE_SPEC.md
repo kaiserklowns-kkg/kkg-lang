@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.11)
+# Klang Language Spec (v0.12)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -484,6 +484,26 @@ Two details that keep the boundary honest:
 - **An unsafe function cannot be passed as a value**, for the same reason — the call
   site would be invisible.
 
+### Raw memory
+
+`pokeByte` and `peekByte` read and write bytes through an `extern type` pointer. This
+is the sharp edge `unsafe` exists for, and it is how a Klang program builds a C struct
+that no safe construct can express — a `sockaddr_in`, for instance, which is exactly
+what [std/net](../std/net.kkg) does to bind a port:
+
+```kkg
+unsafe {
+    let addr = calloc(16, 1)
+    pokeByte(addr, 0, AF_INET)
+    pokeByte(addr, 2, port / 256)
+    pokeByte(addr, 3, port % 256)
+    bind(fd, addr, 16)
+}
+```
+
+Nothing checks that the offset is in range or that the layout is right — that is the
+whole point of the keyword. Put it behind a safe wrapper and callers never see it.
+
 ### Opaque handles
 
 `extern type` declares a C pointer Klang can hold and pass back, but never open:
@@ -610,7 +630,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.11, Phase 10 complete)
+## Implemented today (v0.12, Phase 11 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -642,6 +662,19 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 11 additions — backend: a real HTTP server**
+- `pokeByte` / `peekByte`, unsafe-only, so a Klang program can build a C struct
+- **`std/net`** — TCP listen, accept, connect, read, write over POSIX sockets,
+  behind a `Result` API with no `unsafe` on the outside. POSIX only for now;
+  Windows needs the Winsock variant, which wants its own module
+- **`std/http`** — request parsing (method, path, query, headers, body) and
+  response building, pure Klang with no unsafe at all
+- [examples/server.kkg](../examples/server.kkg) serves HTML, JSON, query strings,
+  POST bodies and 404s, and tests itself: a client task runs on another thread
+  while the server accepts, so it needs no curl to prove it works
+- Escape sequences fixed: carriage return, NUL and single quote were all missing,
+  and an unknown escape used to silently drop the backslash — it is now an error
 
 **Phase 10 additions — concurrency, with nothing shared**
 - `spawn e` -> `Task<T>` on a real OS thread, and `await` to join

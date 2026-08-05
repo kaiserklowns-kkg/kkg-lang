@@ -1,0 +1,6 @@
+extern type Buf
+extern fn calloc(n: int, size: int) -> Buf
+fn main() {
+    let b = unsafe { calloc(4, 1) }
+    pokeByte(b, 0, 1)
+}

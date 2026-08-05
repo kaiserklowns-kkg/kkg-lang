@@ -1,0 +1,140 @@
+// std/net — TCP sockets.
+//
+// POSIX only for now. Windows needs the Winsock variant of these calls, which is
+// different enough that it wants its own module rather than a disguise.
+//
+// As with std/fs, every `unsafe` in the program lives below the line: the exported
+// surface takes and returns ordinary values, and failure is a Result.
+
+extern header "<sys/types.h>"
+extern header "<sys/socket.h>"
+extern header "<netinet/in.h>"
+extern header "<unistd.h>"
+extern header "<string.h>"
+extern header "<stdlib.h>"
+extern header "<errno.h>"
+
+extern type Buf
+
+extern fn socket(domain: int, kind: int, proto: int) -> int
+extern fn bind(fd: int, addr: Buf, len: int) -> int
+extern fn connect(fd: int, addr: Buf, len: int) -> int
+extern fn listen(fd: int, backlog: int) -> int
+extern fn accept(fd: int, addr: Buf, len: Buf) -> int
+extern fn recv(fd: int, buf: Buf, len: int, flags: int) -> int
+extern fn send(fd: int, buf: string, len: int, flags: int) -> int
+extern fn close(fd: int) -> int
+extern fn setsockopt(fd: int, level: int, opt: int, val: Buf, len: int) -> int
+extern fn calloc(n: int, size: int) -> Buf
+extern fn klangPeekBufByte(b: Buf, i: int) -> int = "klang_peek"
+
+const AF_INET = 2
+const SOCK_STREAM = 1
+const SOL_SOCKET = 1
+const SO_REUSEADDR = 2
+const READ_CHUNK = 8192
+
+pub struct Listener { fd: int }
+pub struct Conn { fd: int }
+
+// ── safe surface ──────────────────────────────────────────────────────
+
+pub fn listenOn(port: int) -> Result<Listener, string> {
+    if port < 1 || port > 65535 {
+        return Err("port ${port} is out of range")
+    }
+    let fd = unsafe { socket(AF_INET, SOCK_STREAM, 0) }
+    if fd < 0 {
+        return Err("cannot create a socket")
+    }
+    unsafe {
+        // SO_REUSEADDR, so restarting the server does not hit "address in use".
+        let one = calloc(4, 1)
+        pokeByte(one, 0, 1)
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, one, 4)
+
+        // struct sockaddr_in, built a byte at a time: family, then port in
+        // network order, then INADDR_ANY, then padding — 16 bytes in all.
+        let addr = calloc(16, 1)
+        pokeByte(addr, 0, AF_INET)
+        pokeByte(addr, 1, 0)
+        pokeByte(addr, 2, port / 256)
+        pokeByte(addr, 3, port % 256)
+        if bind(fd, addr, 16) != 0 {
+            close(fd)
+            return Err("cannot bind port ${port} — is something already using it?")
+        }
+    }
+    if unsafe { listen(fd, 128) } != 0 {
+        unsafe { close(fd) }
+        return Err("cannot listen on port ${port}")
+    }
+    return Ok(Listener { fd: fd })
+}
+
+// Connects to an IPv4 address given as four octets, so a client needs no DNS.
+pub fn connectTo(a: int, b: int, c: int, d: int, port: int) -> Result<Conn, string> {
+    if port < 1 || port > 65535 {
+        return Err("port ${port} is out of range")
+    }
+    let fd = unsafe { socket(AF_INET, SOCK_STREAM, 0) }
+    if fd < 0 {
+        return Err("cannot create a socket")
+    }
+    unsafe {
+        let addr = calloc(16, 1)
+        pokeByte(addr, 0, AF_INET)
+        pokeByte(addr, 1, 0)
+        pokeByte(addr, 2, port / 256)
+        pokeByte(addr, 3, port % 256)
+        pokeByte(addr, 4, a)
+        pokeByte(addr, 5, b)
+        pokeByte(addr, 6, c)
+        pokeByte(addr, 7, d)
+        if connect(fd, addr, 16) != 0 {
+            close(fd)
+            return Err("cannot connect to ${a}.${b}.${c}.${d}:${port}")
+        }
+    }
+    return Ok(Conn { fd: fd })
+}
+
+pub fn acceptOne(l: Listener) -> Result<Conn, string> {
+    let fd = unsafe { accept(l.fd, calloc(16, 1), calloc(8, 1)) }
+    if fd < 0 {
+        return Err("accept failed")
+    }
+    return Ok(Conn { fd: fd })
+}
+
+// Reads whatever has arrived. An empty string means the peer closed.
+pub fn readSome(c: Conn) -> Result<string, string> {
+    let mut out = ""
+    unsafe {
+        let buf = calloc(READ_CHUNK + 1, 1)
+        let n = recv(c.fd, buf, READ_CHUNK, 0)
+        if n < 0 {
+            return Err("read failed")
+        }
+        for i in 0..n {
+            out = out + fromByte(klangPeekBufByte(buf, i))
+        }
+    }
+    return Ok(out)
+}
+
+pub fn writeAll(c: Conn, text: string) -> Result<int, string> {
+    let n = unsafe { send(c.fd, text, len(text), 0) }
+    if n < 0 {
+        return Err("write failed")
+    }
+    return Ok(n)
+}
+
+pub fn closeConn(c: Conn) {
+    unsafe { close(c.fd) }
+}
+
+pub fn closeListener(l: Listener) {
+    unsafe { close(l.fd) }
+}

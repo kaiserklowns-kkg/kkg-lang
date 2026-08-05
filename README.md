@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.11 — Phase 10 complete
+## Status: v0.12 — Phase 11 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -62,12 +62,21 @@ aspirational.
   C, so this is not pedantry. Measured at 5–15% on a loop of pure arithmetic;
   `wrapAdd` / `wrapSub` / `wrapMul` when wrapping is what you actually mean.
 - **`toInt` / `toFloat`** — no implicit numeric conversions, and no undefined edges.
+- **Backend** — [std/net](std/net.kkg) gives TCP over POSIX sockets behind a `Result`
+  API, [std/http](std/http.kkg) parses requests and builds responses, and
+  [examples/server.kkg](examples/server.kkg) is a working HTTP server: HTML, JSON,
+  query strings, POST bodies, 404s. It proves itself — a client task runs on another
+  thread while the server accepts, so `make check` covers it without needing curl.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
-  [std/string](std/string.kkg), [std/fs](std/fs.kkg).
+  [std/string](std/string.kkg), [std/fs](std/fs.kkg), [std/net](std/net.kkg),
+  [std/http](std/http.kkg).
 
-Not yet: traits, and all tooling
-(REPL, formatter, linter, package manager).
+**Frontend is not possible yet.** That needs a WASM target, and there isn't one.
+`std/net` is POSIX only; Windows needs the Winsock variant.
+
+Also not yet: JSON parsing (it wants recursive types, which the compiler still
+rejects), traits, and all tooling (REPL, formatter, linter, package manager).
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
@@ -152,7 +161,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase7.kkg](examples/phase7.kkg),
 [examples/phase8.kkg](examples/phase8.kkg),
 [examples/phase9.kkg](examples/phase9.kkg),
-[examples/phase10.kkg](examples/phase10.kkg), and
+[examples/phase10.kkg](examples/phase10.kkg),
+[examples/server.kkg](examples/server.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build
