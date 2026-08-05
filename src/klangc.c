@@ -545,7 +545,7 @@ static char *ty_mangle(const Type *t) { SB sb; sb_init(&sb); ty_mangle_into(t, &
 typedef enum {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT,
     EX_BINARY, EX_UNARY, EX_CALL, EX_FIELD, EX_STRUCT_LIT,
-    EX_VARIANT, EX_MATCH, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD, EX_UNSAFE, EX_SPAWN, EX_AWAIT
+    EX_VARIANT, EX_MATCH, EX_IF, EX_TRY, EX_ARRAY_LIT, EX_INDEX, EX_MAP_LIT, EX_LAMBDA, EX_FNREF, EX_CONSTREF, EX_METHOD, EX_UNSAFE, EX_SPAWN, EX_AWAIT
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -926,6 +926,35 @@ static Pattern parse_pattern(Parser *p) {
     return pat;
 }
 
+/* `if c { a } else { b }` in expression position.
+ *
+ * The braces hold one expression, not a block. Klang has no block-value rule
+ * anywhere else — every function ends in an explicit `return` — and inventing one
+ * here would mean two ways to read a pair of braces. `else` is required, because
+ * without it there is no value when the condition is false.
+ *
+ * The chain is right-nested: the else of one is the next, so `else if` needs no
+ * representation of its own. */
+static Expr *parse_if_expr(Parser *p, int line) {
+    Expr *e = new_expr(EX_IF, line);
+    bool saved = p->no_struct_lit;
+    p->no_struct_lit = true;         /* so `if x { ... }` is not read as a literal */
+    e->lhs = parse_expr(p);
+    p->no_struct_lit = saved;
+    p_expect(p, TK_LBRACE);
+    e->rhs = parse_expr(p);
+    p_expect(p, TK_RBRACE);
+    if (!p_match(p, TK_ELSE))
+        fail(p->cur.line, "an 'if' used as a value needs an 'else' — otherwise there "
+                          "is nothing to give back when the condition is false");
+    int else_line = p->cur.line;
+    if (p_match(p, TK_IF)) { VEC_PUSH_PTR(&e->args, parse_if_expr(p, else_line)); return e; }
+    p_expect(p, TK_LBRACE);
+    VEC_PUSH_PTR(&e->args, parse_expr(p));
+    p_expect(p, TK_RBRACE);
+    return e;
+}
+
 static Expr *parse_match(Parser *p, int line) {
     Expr *e = new_expr(EX_MATCH, line);
     bool saved = p->no_struct_lit;
@@ -1079,6 +1108,7 @@ static Expr *parse_primary(Parser *p) {
     if (p_match(p, TK_TRUE)) { Expr *e = new_expr(EX_BOOL, line); e->bval = true; return e; }
     if (p_match(p, TK_FALSE)) { Expr *e = new_expr(EX_BOOL, line); e->bval = false; return e; }
     if (p_match(p, TK_MATCH)) return parse_match(p, line);
+    if (p_match(p, TK_IF)) return parse_if_expr(p, line);
     if (p_check(p, TK_IDENT)) {
         char *name = p->cur.text;
         p_advance(p);
@@ -2567,16 +2597,30 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
     if (!shadowed && (strcmp(e->sval, "has") == 0 || strcmp(e->sval, "remove") == 0)) {
         bool removing = strcmp(e->sval, "remove") == 0;
         if (e->args.count != 2)
-            fail(e->line, "'%s' takes 2 arguments: the map and the key", e->sval);
+            fail(e->line, removing ? "'remove' takes 2 arguments: the map and the key, "
+                                     "or the array and the index"
+                                   : "'has' takes 2 arguments: the map and the key");
         Expr *m = VEC_PTR(&e->args, 0, Expr);
         Type *mt = tc_expr(m, sc, NULL);
-        if (mt->kind != TY_MAP) fail(e->line, "'%s' needs a map, got %s", e->sval, ty_str(mt));
+        /* `remove` also takes an array and an index, because a list that can only
+           grow is not a list. It keeps order; `has` stays map-only, since asking
+           whether an array has an index is just a comparison with its length. */
+        bool from_array = removing && mt->kind == TY_ARRAY;
+        if (!from_array && mt->kind != TY_MAP)
+            fail(e->line, removing ? "'remove' needs a map or an array, got %s"
+                                   : "'has' needs a map, got %s", ty_str(mt));
         if (removing) {
             Var *root = lvalue_root(m, sc);
             if (!root) fail(e->line, "'remove' needs a variable to remove from");
             if (!root->is_mut)
                 fail(e->line, "cannot remove from '%s' because it is immutable — "
                           "declare it 'let mut' to allow this", root->name);
+        }
+        if (from_array) {
+            Type *it = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_int());
+            if (it->kind != TY_INT)
+                fail(e->line, "removing from an array needs an index, got %s", ty_str(it));
+            return ty_void();
         }
         Type *kt = tc_expr(VEC_PTR(&e->args, 1, Expr), sc, ty_key(mt));
         if (!ty_eq(kt, ty_key(mt)))
@@ -2988,6 +3032,21 @@ static Type *tc_expr(Expr *e, Scope *sc, Type *expected) {
             g_unsafe_depth--;
             break;
         case EX_MATCH: t = tc_match(e, sc, expected); break;
+        case EX_IF: {
+            Type *ct = tc_expr(e->lhs, sc, ty_bool());
+            if (ct->kind != TY_BOOL)
+                fail(e->lhs->line, "an 'if' condition must be bool, got %s", ty_str(ct));
+            Type *a = tc_expr(e->rhs, sc, expected);
+            Type *b = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, expected ? expected : a);
+            if (a->kind == TY_VOID || b->kind == TY_VOID)
+                fail(e->line, "this 'if' is used as a value, so both branches have to "
+                              "produce one");
+            if (!ty_eq(a, b))
+                fail(e->line, "the branches of this 'if' disagree: one gives %s, the "
+                              "other %s", ty_str(a), ty_str(b));
+            t = a;
+            break;
+        }
         case EX_TRY: t = tc_try(e, sc); break;
         case EX_ARRAY_LIT: {
             Type *want = expected && expected->kind == TY_ARRAY ? ty_elem(expected) : NULL;
@@ -3414,7 +3473,11 @@ static void root_local(SB *sb, int ind, const Type *t, const char *name) {
    forces earlier operands into temporaries so they run first. */
 static bool has_call(Expr *e) {
     if (!e) return false;
-    if (e->kind == EX_CALL || e->kind == EX_MATCH || e->kind == EX_TRY) return true;
+    /* EX_IF and EX_MATCH are here not because they call, but because they lower to
+       statements: whatever came before them has to be in a temporary already, or it
+       would be evaluated after their branches run. */
+    if (e->kind == EX_CALL || e->kind == EX_MATCH || e->kind == EX_IF || e->kind == EX_TRY)
+        return true;
     if (has_call(e->lhs) || has_call(e->rhs)) return true;
     for (int i = 0; i < e->args.count; i++) if (has_call(VEC_PTR(&e->args, i, Expr))) return true;
     for (int i = 0; i < e->fields.count; i++)
@@ -3449,6 +3512,40 @@ static void cg_variant_value(const Type *enum_ty, const char *variant, Vec *arg_
         cg_expr(VEC_PTR(arg_exprs, i, Expr), out, pre, ind);
     }
     sb_append(out, " }");
+}
+
+/* Lower an if-expression into a C if that assigns to `dest`. Recursive, because
+   the parser leaves `else if` as a nested if-expression in the else slot. */
+static void cg_if_expr(Expr *e, SB *pre, int ind, const char *dest) {
+    SB cpre; sb_init(&cpre);
+    SB cval; sb_init(&cval);
+    cg_expr(e->lhs, &cval, &cpre, ind);
+    sb_append(pre, cpre.data);
+    indent_to(pre, ind);
+    sb_appendf(pre, "if (%s) {\n", unwrap_cond(cval.data));
+
+    SB tpre; sb_init(&tpre);
+    SB tval; sb_init(&tval);
+    cg_expr(e->rhs, &tval, &tpre, ind + 1);
+    sb_append(pre, tpre.data);
+    indent_to(pre, ind + 1);
+    sb_appendf(pre, "%s = %s;\n", dest, tval.data);
+
+    indent_to(pre, ind);
+    sb_append(pre, "} else {\n");
+    Expr *els = VEC_PTR(&e->args, 0, Expr);
+    if (els->kind == EX_IF) {
+        cg_if_expr(els, pre, ind + 1, dest);
+    } else {
+        SB epre; sb_init(&epre);
+        SB eval; sb_init(&eval);
+        cg_expr(els, &eval, &epre, ind + 1);
+        sb_append(pre, epre.data);
+        indent_to(pre, ind + 1);
+        sb_appendf(pre, "%s = %s;\n", dest, eval.data);
+    }
+    indent_to(pre, ind);
+    sb_append(pre, "}\n");
 }
 
 /* Lower a match. If result_var is non-NULL each expression arm assigns into it. */
@@ -3665,6 +3762,22 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 cg_expr(fi->value, out, pre, ind);
             }
             sb_append(out, " }");
+            break;
+        }
+        case EX_IF: {
+            /* A C conditional expression would be shorter, but a branch may need
+               statements of its own — a call that pins its operands, say — and those
+               have to land inside the branch that uses them. */
+            char *tmp = fresh_tmp();
+            indent_to(pre, ind);
+            sb_appendf(pre, "%s %s;\n", c_type(e->type), tmp);
+            if (type_has_gc(e->type)) {
+                indent_to(pre, ind);
+                sb_appendf(pre, "memset(&%s, 0, sizeof %s);\n", tmp, tmp);
+            }
+            root_local(pre, ind, e->type, tmp);
+            cg_if_expr(e, pre, ind, tmp);
+            sb_append(out, tmp);
             break;
         }
         case EX_MATCH: {
@@ -4743,6 +4856,17 @@ static const char *JS_RUNTIME =
     "    }\n"
     "    return (int64_t)d;\n"
     "}\n"
+    /* An exported function's string arguments arrive in memory JavaScript owns —
+       Module.ccall allocates them on the stack and releases them the moment the
+       call returns. A Klang string has to outlive that, since the callee may well
+       store it, so it is copied in on the way. */
+    "char *klang_js_own(const char *raw) {\n"
+    "    if (!raw) return klang_gc_alloc(1);\n"
+    "    size_t n = strlen(raw) + 1;\n"
+    "    char *out = klang_gc_alloc(n);\n"
+    "    memcpy(out, raw, n);\n"
+    "    return out;\n"
+    "}\n"
     "/* Takes ownership of a malloc'd UTF-8 string and hands back a GC-owned copy. */\n"
     "char *klang_js_str(char *raw) {\n"
     "    if (!raw) return klang_gc_alloc(1);\n"
@@ -4791,7 +4915,15 @@ static void emit_array(const Type *t, SB *sb) {
                    "        %s *nd = klang_gc_grow(a->data, sizeof(%s) * (size_t)ncap);\n"
                    "        a->data = nd; a->cap = ncap;\n"
                    "    }\n"
-                   "    a->data[a->len++] = v;\n}\n\n", m, m, e, e, e);
+                   "    a->data[a->len++] = v;\n}\n", m, m, e, e, e);
+    /* Removal keeps order, because a list that reshuffles itself when you delete
+       from it is a surprise nobody wants. The vacated slot is cleared so the
+       collector does not keep the last element alive through the tail. */
+    sb_appendf(sb, "void %s_remove(%s a, int64_t i) {\n"
+                   "    if (i < 0 || i >= a->len) klang_bounds(i, a->len);\n"
+                   "    for (int64_t j = i; j + 1 < a->len; j++) a->data[j] = a->data[j + 1];\n"
+                   "    a->len--;\n"
+                   "    memset(&a->data[a->len], 0, sizeof(%s));\n}\n\n", m, m, e);
 }
 
 /* Deep-copies whatever crosses a thread boundary. Numbers and strings are
@@ -5383,6 +5515,8 @@ static void emit_js_export(FnDecl *fd, SB *sb) {
         if (i) sb_append(sb, ", ");
         if (pm->type->kind == TY_INT)
             sb_appendf(sb, "klang_js_int(%s, \"%s\")", pm->name, fd->name);
+        else if (pm->type->kind == TY_STRING)
+            sb_appendf(sb, "klang_js_own(%s)", pm->name);
         else sb_append(sb, pm->name);
     }
     sb_append(sb, ")");
@@ -5452,11 +5586,11 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 
 static void codegen(SB *sb) {
     sb_init(&g_js_lib);
-    sb_append(&g_js_lib, "// Generated by klangc 0.17 — the JavaScript half of this\n"
+    sb_append(&g_js_lib, "// Generated by klangc 0.18 — the JavaScript half of this\n"
                          "// program's 'js fn' declarations. Pass it to emcc with\n"
                          "// --js-library; do not edit by hand.\n"
                          "mergeInto(LibraryManager.library, {\n");
-    sb_append(sb, "/* Generated by klangc 0.17 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.18 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -6459,7 +6593,7 @@ int main(int argc, char **argv) {
     g_exe_dir = dir_of(argv[0]);
 
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc - the Klang compiler (0.17)\n\n"
+        printf("klangc - the Klang compiler (0.18)\n\n"
                "Start something:\n"
                "  klangc new <name>                A project that already runs\n"
                "    --kind web|cli|server          What sort (default: web)\n"
@@ -6484,7 +6618,7 @@ int main(int argc, char **argv) {
                "directory named after it, or in web/.\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.17.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.18.0\n"); return 0; }
     if (strcmp(argv[1], "new") == 0) return cmd_new(argc - 2, argv + 2);
     if (strcmp(argv[1], "run") == 0) return cmd_run(argc - 2, argv + 2);
     if (strcmp(argv[1], "web") == 0) return cmd_web(argc - 2, argv + 2);

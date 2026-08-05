@@ -4,9 +4,13 @@
 // This module does that unsafe work once and exports a safe API, exactly the way
 // std/fs does for C. Nothing that imports std/dom needs the word `unsafe`.
 //
-// Elements are referred to by CSS selector rather than by handle. A handle would
+// Elements are named by CSS selector rather than held as handles. A handle would
 // have to be a JavaScript object living outside Klang's heap, which the collector
 // could neither see nor free; a selector is a string, and strings cross cleanly.
+//
+// Callbacks are named by string, for the same reason: a Klang closure lives in
+// Klang's heap and JavaScript has no way to keep it alive or to know when it is
+// done with it. A handler is an `export fn`, which is a plain symbol.
 
 import "std/string" as str
 
@@ -16,6 +20,10 @@ js fn jsExists(sel: string) -> bool {
     return document.querySelector(sel) !== null
 }
 
+js fn jsCount(sel: string) -> int {
+    return document.querySelectorAll(sel).length
+}
+
 js fn jsGetText(sel: string) -> string {
     var el = document.querySelector(sel)
     return el === null ? "" : el.textContent
@@ -23,7 +31,16 @@ js fn jsGetText(sel: string) -> string {
 
 js fn jsGetValue(sel: string) -> string {
     var el = document.querySelector(sel)
-    return el === null ? "" : String(el.value === undefined ? "" : el.value)
+    if (el === null) return ""
+    if (el.type === "checkbox") return el.checked ? "true" : ""
+    return String(el.value === undefined ? "" : el.value)
+}
+
+js fn jsGetAttr(sel: string, name: string) -> string {
+    var el = document.querySelector(sel)
+    if (el === null) return ""
+    var v = el.getAttribute(name)
+    return v === null ? "" : v
 }
 
 // ── changing it ───────────────────────────────────────────────────────
@@ -48,9 +65,19 @@ js fn jsSetAttr(sel: string, name: string, value: string) {
     if (el !== null) el.setAttribute(name, value)
 }
 
+js fn jsRemoveAttr(sel: string, name: string) {
+    var el = document.querySelector(sel)
+    if (el !== null) el.removeAttribute(name)
+}
+
 js fn jsAppendHtml(sel: string, html: string) {
     var el = document.querySelector(sel)
     if (el !== null) el.insertAdjacentHTML("beforeend", html)
+}
+
+js fn jsRemoveNode(sel: string) {
+    var el = document.querySelector(sel)
+    if (el !== null) el.remove()
 }
 
 js fn jsAddClass(sel: string, name: string) {
@@ -63,48 +90,197 @@ js fn jsRemoveClass(sel: string, name: string) {
     if (el !== null) el.classList.remove(name)
 }
 
-// ── events ────────────────────────────────────────────────────────────
-//
-// A JavaScript callback cannot be a Klang closure: the closure lives in Klang's
-// heap and JavaScript has no way to keep it alive or to know when it is done
-// with it. So an event handler names an `export fn`, which is a plain symbol
-// JavaScript can call by name, and the wiring is a string on both sides.
-
-js fn jsOn(sel: string, event: string, exportedFn: string) {
+js fn jsHasClass(sel: string, name: string) -> bool {
     var el = document.querySelector(sel)
-    if (el === null) return
-    el.addEventListener(event, function() { Module["_" + exportedFn](); })
+    return el !== null && el.classList.contains(name)
 }
 
-// ── the console, and the clock ────────────────────────────────────────
+js fn jsFocus(sel: string) {
+    var el = document.querySelector(sel)
+    if (el !== null) el.focus()
+}
 
-js fn jsLog(text: string) {
-    console.log(text)
+// ── events ────────────────────────────────────────────────────────────
+//
+// Four shapes, because a handler usually needs to know something about what
+// happened. Each passes exactly one thing, typed, rather than an event object
+// that could not cross the boundary anyway.
+
+js fn jsOn(sel: string, event: string, handler: string) {
+    var el = document.querySelector(sel)
+    if (el === null) return
+    el.addEventListener(event, function() { Module["_" + handler]() })
+}
+
+// The value of whatever was interacted with: an input's text, a checkbox's
+// "true" or "".
+js fn jsOnValue(sel: string, event: string, handler: string) {
+    var el = document.querySelector(sel)
+    if (el === null) return
+    el.addEventListener(event, function(ev) {
+        var t = ev.target
+        var v = t.type === "checkbox" ? (t.checked ? "true" : "")
+              : String(t.value === undefined ? "" : t.value)
+        Module.ccall(handler, null, ["string"], [v])
+    })
+}
+
+js fn jsOnKey(sel: string, event: string, handler: string) {
+    var el = document.querySelector(sel)
+    if (el === null) return
+    el.addEventListener(event, function(ev) {
+        Module.ccall(handler, null, ["string"], [String(ev.key)])
+    })
+}
+
+// Delegation: one listener on a container, told which child was hit. That is how
+// a list of a thousand rows gets one handler instead of a thousand.
+js fn jsOnChild(sel: string, event: string, childSel: string, handler: string) {
+    var el = document.querySelector(sel)
+    if (el === null) return
+    el.addEventListener(event, function(ev) {
+        var hit = ev.target.closest(childSel)
+        if (hit === null || !el.contains(hit)) return
+        Module.ccall(handler, null, ["string"], [String(hit.dataset.id || hit.id || "")])
+    })
+}
+
+// A form submit that does not reload the page, which is almost always what is
+// wanted and is easy to forget.
+js fn jsOnSubmit(sel: string, handler: string) {
+    var el = document.querySelector(sel)
+    if (el === null) return
+    el.addEventListener("submit", function(ev) {
+        ev.preventDefault()
+        Module["_" + handler]()
+    })
+}
+
+// The address bar is not an element, so it gets its own listener.
+js fn jsOnHash(handler: string) {
+    window.addEventListener("hashchange", function() { Module["_" + handler]() })
+}
+
+// ── time ──────────────────────────────────────────────────────────────
+
+js fn jsAfter(ms: int, handler: string) -> int {
+    return setTimeout(function() { Module["_" + handler]() }, ms)
+}
+
+js fn jsEvery(ms: int, handler: string) -> int {
+    return setInterval(function() { Module["_" + handler]() }, ms)
+}
+
+js fn jsCancel(id: int) {
+    clearTimeout(id)
+    clearInterval(id)
 }
 
 js fn jsNow() -> float {
     return Date.now()
 }
 
+// ── the address bar, and storage that survives a reload ───────────────
+
+js fn jsPath() -> string {
+    return location.pathname
+}
+
+js fn jsHash() -> string {
+    return location.hash
+}
+
+js fn jsSetHash(h: string) {
+    location.hash = h
+}
+
+js fn jsQuery(name: string) -> string {
+    var v = new URLSearchParams(location.search).get(name)
+    return v === null ? "" : v
+}
+
+js fn jsSetTitle(t: string) {
+    document.title = t
+}
+
+js fn jsStore(key: string, value: string) {
+    try { localStorage.setItem(key, value) } catch (e) { }
+}
+
+js fn jsStored(key: string) -> string {
+    try {
+        var v = localStorage.getItem(key)
+        return v === null ? "" : v
+    } catch (e) { return "" }
+}
+
+js fn jsForget(key: string) {
+    try { localStorage.removeItem(key) } catch (e) { }
+}
+
+js fn jsLog(text: string) {
+    console.log(text)
+}
+
+js fn jsWarn(text: string) {
+    console.warn(text)
+}
+
 // ── the safe surface ──────────────────────────────────────────────────
+//
+// One `unsafe` each, and none anywhere else.
 
 pub fn exists(sel: string) -> bool { return unsafe { jsExists(sel) } }
+pub fn count(sel: string) -> int { return unsafe { jsCount(sel) } }
 pub fn text(sel: string) -> string { return unsafe { jsGetText(sel) } }
 pub fn value(sel: string) -> string { return unsafe { jsGetValue(sel) } }
+pub fn attr(sel: string, name: string) -> string { return unsafe { jsGetAttr(sel, name) } }
+
+// A checkbox reads back as "true" or "", so asking whether it is ticked is a
+// question the library should answer rather than each caller.
+pub fn checked(sel: string) -> bool { return value(sel) == "true" }
 
 pub fn setText(sel: string, text: string) { unsafe { jsSetText(sel, text) } }
 pub fn setHtml(sel: string, html: string) { unsafe { jsSetHtml(sel, html) } }
 pub fn setValue(sel: string, v: string) { unsafe { jsSetValue(sel, v) } }
 pub fn setAttr(sel: string, name: string, v: string) { unsafe { jsSetAttr(sel, name, v) } }
+pub fn removeAttr(sel: string, name: string) { unsafe { jsRemoveAttr(sel, name) } }
 pub fn append(sel: string, html: string) { unsafe { jsAppendHtml(sel, html) } }
+pub fn clear(sel: string) { setHtml(sel, "") }
+pub fn removeNode(sel: string) { unsafe { jsRemoveNode(sel) } }
 pub fn addClass(sel: string, name: string) { unsafe { jsAddClass(sel, name) } }
 pub fn removeClass(sel: string, name: string) { unsafe { jsRemoveClass(sel, name) } }
+pub fn hasClass(sel: string, name: string) -> bool { return unsafe { jsHasClass(sel, name) } }
+pub fn focus(sel: string) { unsafe { jsFocus(sel) } }
 
-// `handler` must name an `export fn` taking no arguments.
+// `handler` names an `export fn`. `on` and `onSubmit` want one taking nothing;
+// `onValue`, `onKey` and `onChild` want one taking a single string.
 pub fn on(sel: string, event: string, handler: string) { unsafe { jsOn(sel, event, handler) } }
+pub fn onValue(sel: string, event: string, handler: string) { unsafe { jsOnValue(sel, event, handler) } }
+pub fn onKey(sel: string, event: string, handler: string) { unsafe { jsOnKey(sel, event, handler) } }
+pub fn onChild(sel: string, event: string, childSel: string, handler: string) {
+    unsafe { jsOnChild(sel, event, childSel, handler) }
+}
+pub fn onSubmit(sel: string, handler: string) { unsafe { jsOnSubmit(sel, handler) } }
+pub fn onHashChange(handler: string) { unsafe { jsOnHash(handler) } }
+
+pub fn after(ms: int, handler: string) -> int { return unsafe { jsAfter(ms, handler) } }
+pub fn every(ms: int, handler: string) -> int { return unsafe { jsEvery(ms, handler) } }
+pub fn cancel(id: int) { unsafe { jsCancel(id) } }
+pub fn now() -> float { return unsafe { jsNow() } }
+
+pub fn path() -> string { return unsafe { jsPath() } }
+pub fn hash() -> string { return unsafe { jsHash() } }
+pub fn setHash(h: string) { unsafe { jsSetHash(h) } }
+pub fn query(name: string) -> string { return unsafe { jsQuery(name) } }
+pub fn setTitle(t: string) { unsafe { jsSetTitle(t) } }
+
+pub fn store(key: string, value: string) { unsafe { jsStore(key, value) } }
+pub fn stored(key: string) -> string { return unsafe { jsStored(key) } }
+pub fn forget(key: string) { unsafe { jsForget(key) } }
 
 pub fn log(text: string) { unsafe { jsLog(text) } }
-pub fn now() -> float { return unsafe { jsNow() } }
+pub fn warn(text: string) { unsafe { jsWarn(text) } }
 
 // Text going into innerHTML has to be escaped, and forgetting is the oldest bug
 // on the web — so the library does it rather than leaving it to each caller.
@@ -113,4 +289,9 @@ pub fn escape(s: string) -> string {
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
+            .replace("'", "&#39;")
 }
+
+// An attribute value goes inside quotes in generated HTML, so it needs escaping
+// too — and a selector built from an id needs the id to be a plain word.
+pub fn attrValue(s: string) -> string { return escape(s) }

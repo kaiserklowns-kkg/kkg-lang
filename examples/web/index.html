@@ -1,48 +1,63 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Klang in the browser</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 16px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
   h1 { font-size: 1.4rem; margin-bottom: .2rem; }
   p.sub { margin-top: 0; opacity: .7; font-size: .9rem; }
-  ul { list-style: none; padding: 0; border: 1px solid #8884; border-radius: .5rem; }
-  li { padding: .55rem .8rem; border-bottom: 1px solid #8882; }
-  li:last-child { border-bottom: 0; }
-  li.done { opacity: .5; text-decoration: line-through; }
-  li.empty { opacity: .5; font-style: italic; }
-  .row { display: flex; gap: .5rem; margin: 1rem 0; }
+
+  form { display: flex; gap: .5rem; margin: 1.2rem 0 .8rem; }
   input { flex: 1; padding: .5rem .7rem; border: 1px solid #8886; border-radius: .4rem;
           background: transparent; color: inherit; font: inherit; }
   button { padding: .5rem .9rem; border: 1px solid #8886; border-radius: .4rem;
            background: transparent; color: inherit; font: inherit; cursor: pointer; }
   button:hover { background: #8882; }
-  .status { display: flex; justify-content: space-between; font-size: .85rem; opacity: .75; }
+
+  nav { display: flex; gap: .4rem; font-size: .85rem; margin-bottom: .8rem; }
+  nav a { padding: .2rem .6rem; border-radius: .3rem; text-decoration: none; color: inherit; opacity: .6; }
+  nav a.on { opacity: 1; background: #8883; }
+
+  ul { list-style: none; padding: 0; margin: 0; border: 1px solid #8884; border-radius: .5rem; }
+  li { display: flex; align-items: center; gap: .6rem; padding: .45rem .6rem;
+       border-bottom: 1px solid #8882; }
+  li:last-child { border-bottom: 0; }
+  li span { flex: 1; }
+  li.done span { opacity: .45; text-decoration: line-through; }
+  li.empty { opacity: .5; font-style: italic; justify-content: center; }
+  li button { border: 0; padding: .15rem .45rem; font-size: 1rem; opacity: .6; }
+  li button:hover { opacity: 1; }
+
+  .status { display: flex; justify-content: space-between; align-items: center;
+            font-size: .85rem; opacity: .75; margin-top: .8rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 
 <h1>Klang in the browser</h1>
 <p class="sub">
-  Every line below — the state, the rendering, the event handlers — is
+  State, rendering, routing, storage and every event handler are
   <a href="../web.kkg">examples/web.kkg</a>, compiled to WebAssembly. This page
   contains no application JavaScript.
 </p>
 
-<div class="row">
+<form id="form">
   <label class="sr-only" for="entry">Task</label>
-  <input id="entry" placeholder="something to do" autocomplete="off">
-  <button id="add">add</button>
-</div>
+  <input id="entry" placeholder="something to do — esc to clear" autocomplete="off">
+  <button type="submit">add</button>
+</form>
+
+<nav>
+  <a id="f-all" href="#">all</a>
+  <a id="f-todo" href="#todo">todo</a>
+  <a id="f-done" href="#done">done</a>
+</nav>
 
 <ul id="list"><li class="empty">loading…</li></ul>
 
 <div class="status">
   <span id="count"></span>
   <span id="message"></span>
-</div>
-
-<div class="row">
-  <button id="complete">complete first</button>
   <button id="clear">clear done</button>
 </div>
 

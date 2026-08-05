@@ -1,0 +1,4 @@
+fn main() {
+    let x = if 1 { "a" } else { "b" }
+    println(x)
+}

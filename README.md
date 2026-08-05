@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.17 — Phase 16 complete
+## Status: v0.18 — Phase 17 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -83,12 +83,17 @@ aspirational.
   precise collector was for: WASM locals are not addressable memory, so the old
   conservative scan found nothing there and freed live objects. See
   [docs/WASM.md](docs/WASM.md) for the before/after measurements.
+- **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces
+  hold one expression and `else` is required, so braces keep meaning one thing.
 - **Frontend** — `js fn` declares a function whose body is JavaScript and lets the
   compiler marshal the boundary; `export fn` makes a Klang function callable from
   JavaScript; module-level `let mut` holds the state an event handler needs.
-  [std/dom](std/dom.kkg) builds a safe API on top, and
-  [examples/web.kkg](examples/web.kkg) is a whole page — state, rendering, events —
-  with no JavaScript in it.
+  [std/dom](std/dom.kkg) is a real DOM library on top of that — text, HTML,
+  attributes, classes, `onValue` / `onKey` / `onChild` / `onSubmit`, hash routing,
+  localStorage, timers, and escaping that the library does so you cannot forget.
+  [examples/web.kkg](examples/web.kkg) is a working application — a form, event
+  delegation over a list, routing, and state persisted as JSON — with no
+  JavaScript in it, and `make test-web` drives all of it against a stub DOM.
 - **A toolchain, not just a compiler** — `klangc new` writes a project that
   already runs (web, cli or server); `klangc run` compiles, builds and executes a
   native program; `klangc web run` does the same for a page — emcc, a dev server,

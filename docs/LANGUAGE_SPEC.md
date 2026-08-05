@@ -1,4 +1,4 @@
-# Klang Language Spec (v0.17)
+# Klang Language Spec (v0.18)
 
 > This spec describes the language we are building **from scratch**. Nothing here is
 > retrofitted from a previous implementation — this document is the source of truth,
@@ -76,6 +76,19 @@ while i < 10 {
 }
 ```
 
+`if` is also an expression, which is usually what you want when the alternative is
+three lines and a `mut`:
+
+```kkg
+let label = if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }
+```
+
+Two rules, and they are the same rule twice: **the braces hold one expression**, and
+**`else` is required**. Klang has no block-value anywhere else — every function ends
+in an explicit `return` — so a brace pair that quietly evaluated to its last statement
+would be a second thing braces can mean. And without `else` there is no value when the
+condition is false. Both branches must have the same type; neither may be void.
+
 ### Structs
 
 ```kkg
@@ -133,7 +146,14 @@ let grid = [[1, 2], [3, 4]]   // arrays nest
 ```
 
 Mutation follows the same rule as everything else: `let` is enough to read an array, but
-pushing to it or assigning into it requires `let mut`.
+pushing to it, assigning into it, or removing from it requires `let mut`.
+
+```kkg
+remove(xs, 0)          // by index, bounds-checked, order preserved
+```
+
+Order is preserved rather than swapping the last element into the gap: a list that
+reshuffles itself when you delete from it is a surprise nobody wants.
 
 ### Maps
 
@@ -604,11 +624,29 @@ same reason. A string argument or result crosses as a pointer, so a JavaScript
 caller uses `Module.ccall("name", "string", ["string"], [...])`.
 
 An event handler cannot be a Klang closure — the closure lives in Klang's heap and
-JavaScript has no way to keep it alive — so `dom.on` names an `export fn` instead:
+JavaScript has no way to keep it alive — so a handler is named by string, and the
+name is an `export fn`:
 
 ```kkg
-dom.on("#add", "click", "addTask")
+dom.onSubmit("#form", "addTask")                       // takes nothing
+dom.onKey("#entry", "keydown", "onKey")                // takes the key
+dom.onValue("#search", "input", "onSearch")            // takes the field's value
+dom.onChild("#list", "click", ".delete", "deleteRow")  // takes the row's data-id
 ```
+
+The last one is delegation: one listener on the container, told which child was
+hit, so a list of a thousand rows needs one handler rather than a thousand.
+
+A string argument arriving this way is copied into the collected heap on the way
+in. `Module.ccall` allocates it on the stack and releases it the moment the call
+returns, so a handler that stored the pointer would be holding freed memory —
+which it is not, because the boundary copies.
+
+Beyond events, [std/dom](../std/dom.kkg) covers reading and writing text, HTML,
+values, attributes and classes; `localStorage`; the hash and query string, with
+`onHashChange` for routing; `setTimeout` and `setInterval`; and `escape`, because
+forgetting to escape is the oldest bug on the web and a library should not leave
+it to each caller.
 
 ### Module-level state
 
@@ -807,7 +845,7 @@ never reach a safepoint and a collection started elsewhere would wait forever.
 locking and the safepoints are only emitted when the program actually contains a
 `spawn`, so single-threaded code keeps exactly the performance it had.
 
-## Implemented today (v0.17, Phase 16 complete)
+## Implemented today (v0.18, Phase 17 complete)
 
 **v0.1 core**
 - `let`, `let mut`, immutability enforcement
@@ -839,6 +877,20 @@ locking and the safepoints are only emitted when the program actually contains a
 - String interpolation: `"${expr}"`, converting values automatically; `\${` escapes it
 - `mut` parameters, so a function can declare that it modifies what it was given
 - Mutation rules extend to arrays: pushing or index-assigning needs `let mut`
+
+**Phase 17 additions — enough language to write a page**
+- **`if` as an expression** — `let label = if n < 0 { "neg" } else { "pos" }`. Braces
+  hold one expression and `else` is required, so braces keep meaning one thing.
+- **`remove(xs, i)` on arrays**, bounds-checked and order-preserving. A list that
+  could only grow was not a list.
+- **std/dom is a real DOM library**: `onValue` / `onKey` / `onChild` / `onSubmit`
+  hand a handler the one thing it needs; `onHashChange` for routing; localStorage;
+  timers; classes, attributes, focus, counts; `escape` on the way into HTML.
+- String arguments into an `export fn` are copied into the collected heap, because
+  `ccall` frees its stack allocation the moment the call returns
+- **[examples/web.kkg](../examples/web.kkg)** is now a real application — a form,
+  event delegation over a list, hash routing, and state persisted as JSON through
+  std/json — and `make test-web` drives every one of those against a stub DOM
 
 **Phase 16 additions — a project, from nothing**
 - **`klangc new <name>`** — a project that already runs. `--kind web` (default),

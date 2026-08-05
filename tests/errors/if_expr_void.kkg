@@ -1,0 +1,4 @@
+fn nothing() {}
+fn main() {
+    let x = if true { nothing() } else { nothing() }
+}

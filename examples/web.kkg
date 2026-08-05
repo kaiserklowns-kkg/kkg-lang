@@ -1,101 +1,233 @@
-// A web page, in Klang.
+// A real web application, in Klang. No JavaScript in this file.
 //
-// The whole thing — state, logic, rendering, event handling — is this file.
-// There is no JavaScript in it, because std/dom did that part once.
+// Form submission, event delegation over a list, hash routing, and state that
+// survives a reload — the things an actual page needs, rather than a counter.
 //
-//   klangc examples/web.kkg -o examples/web/web.c
-//   emcc -O2 examples/web/web.c -o examples/web/web.js -sALLOW_MEMORY_GROWTH
-//   (serve examples/web/ over http and open index.html)
+//     klangc web run examples/web.kkg
 
 import "std/dom"
 import "std/list"
+import "std/json"
 import "std/string" as str
 
 struct Task {
+    id: int,
     title: string,
     done: bool,
 }
 
-// Module-level state. An event handler runs long after main returned and cannot
-// capture a local, so the page's state has to live here. `let mut` says it
-// changes; `const` would say it does not.
+// A handler runs long after main returned and cannot capture a local, so the
+// page's state lives at module level. `let mut` says it changes; `const` would
+// say it does not.
 let mut tasks: [Task] = []
-let mut message = ""
+let mut nextId = 1
+let mut filter = "all"
+
+const STORE_KEY = "klang.tasks"
+
+// ── persistence ───────────────────────────────────────────────────────
+//
+// std/json is ordinary Klang with no FFI, so it works in a browser unchanged.
+
+fn toJson() -> string {
+    let mut items: [json.Json] = []
+    for t in tasks {
+        push(items, Obj([
+            json.field("id", json.numOf(t.id)),
+            json.field("title", Str(t.title)),
+            json.field("done", Bool(t.done)),
+        ]))
+    }
+    return json.stringify(Arr(items))
+}
+
+fn fieldText(doc: json.Json, key: string) -> string {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asString(v) { Some(s) => s, None => "" },
+        None    => "",
+    }
+}
+
+fn fieldInt(doc: json.Json, key: string) -> int {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asFloat(v) { Some(n) => toInt(n), None => 0 },
+        None    => 0,
+    }
+}
+
+fn fieldBool(doc: json.Json, key: string) -> bool {
+    return match json.lookup(doc, key) {
+        Some(v) => match json.asBool(v) { Some(b) => b, None => false },
+        None    => false,
+    }
+}
+
+fn load() {
+    let saved = dom.stored(STORE_KEY)
+    if saved == "" {
+        // First visit: something to look at rather than an empty box.
+        push(tasks, Task { id: 1, title: "write a language", done: true })
+        push(tasks, Task { id: 2, title: "give it a garbage collector", done: true })
+        push(tasks, Task { id: 3, title: "make it run in a browser", done: false })
+        nextId = 4
+        return
+    }
+    match json.parse(saved) {
+        Err(e) => dom.warn("stored tasks are not readable (${e}) — starting fresh")
+        Ok(doc) => {
+            for item in json.items(doc) {
+                let id = fieldInt(item, "id")
+                push(tasks, Task { id: id, title: fieldText(item, "title"),
+                                   done: fieldBool(item, "done") })
+                nextId = if id >= nextId { id + 1 } else { nextId }
+            }
+        }
+    }
+}
+
+fn save() {
+    dom.store(STORE_KEY, toJson())
+}
+
+// ── rendering ─────────────────────────────────────────────────────────
+
+fn visible() -> [Task] {
+    if filter == "done" {
+        return list.filter(tasks, |t| t.done)
+    }
+    if filter == "todo" {
+        return list.filter(tasks, |t| !t.done)
+    }
+    return tasks
+}
 
 fn row(t: Task) -> string {
-    if t.done {
-        return "<li class=\"done\">☑ ${dom.escape(t.title)}</li>"
-    }
-    return "<li class=\"todo\">☐ ${dom.escape(t.title)}</li>"
+    let cls = if t.done { "task done" } else { "task" }
+    let mark = if t.done { "☑" } else { "☐" }
+    // Every piece of user text is escaped. Forgetting that is the oldest bug on
+    // the web, so std/dom provides it and this line always uses it.
+    return "<li class=\"${cls}\">"
+         + "<button class=\"toggle\" data-id=\"${t.id}\" title=\"toggle\">${mark}</button>"
+         + "<span>${dom.escape(t.title)}</span>"
+         + "<button class=\"delete\" data-id=\"${t.id}\" title=\"delete\">×</button>"
+         + "</li>"
 }
 
 fn render() {
-    if tasks.len() == 0 {
-        dom.setHtml("#list", "<li class=\"empty\">nothing yet</li>")
+    let shown = visible()
+    if shown.len() == 0 {
+        dom.setHtml("#list", "<li class=\"empty\">nothing here</li>")
     } else {
-        dom.setHtml("#list", list.map(tasks, row).join(""))
+        dom.setHtml("#list", str.join(list.map(shown, row), ""))
     }
+
     let left = list.count(tasks, |t| !t.done)
     dom.setText("#count", "${left} of ${tasks.len()} left")
-    dom.setText("#message", message)
+    dom.setTitle(if left == 0 { "Klang — all done" } else { "Klang — ${left} left" })
+
+    for name in ["all", "todo", "done"] {
+        if name == filter {
+            dom.addClass("#f-${name}", "on")
+        } else {
+            dom.removeClass("#f-${name}", "on")
+        }
+    }
 }
 
-// Exported functions are the ones JavaScript can call. They are ordinary Klang;
-// the only rule is that their arguments and results must be types JavaScript
-// understands, which the compiler enforces.
+fn indexOfId(id: int) -> int {
+    for i in 0..tasks.len() {
+        if tasks[i].id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+// ── the handlers JavaScript can reach ─────────────────────────────────
+//
+// An `export fn` is a plain symbol JavaScript calls by name. Its arguments and
+// result have to be types JavaScript understands, and the compiler holds you to
+// that — an array or a struct is refused rather than half-marshalled.
 
 export fn addTask() {
     let title = str.trim(dom.value("#entry"))
     if title == "" {
-        message = "type something first"
-        render()
+        dom.setText("#message", "type something first")
         return
     }
-    push(tasks, Task { title: title, done: false })
-    message = ""
+    push(tasks, Task { id: nextId, title: title, done: false })
+    nextId += 1
     dom.setValue("#entry", "")
+    dom.setText("#message", "")
+    dom.focus("#entry")
+    save()
     render()
 }
 
-export fn completeFirst() {
-    let mut i = 0
-    while i < tasks.len() {
-        if !tasks[i].done {
-            tasks[i] = Task { title: tasks[i].title, done: true }
-            message = ""
-            render()
-            return
-        }
-        i += 1
+// Delegated: one listener on the list, told which row was hit.
+export fn toggleTask(idText: string) {
+    let i = indexOfId(parseId(idText))
+    if i >= 0 {
+        tasks[i] = Task { id: tasks[i].id, title: tasks[i].title, done: !tasks[i].done }
+        save()
+        render()
     }
-    message = "everything is done"
-    render()
+}
+
+export fn deleteTask(idText: string) {
+    let i = indexOfId(parseId(idText))
+    if i >= 0 {
+        remove(tasks, i)
+        save()
+        render()
+    }
 }
 
 export fn clearDone() {
     let before = tasks.len()
-    // Assigning to module state rebinds it, which is how a list shrinks.
     tasks = list.filter(tasks, |t| !t.done)
-    message = "cleared ${before - tasks.len()}"
+    dom.setText("#message", if before == tasks.len() { "nothing to clear" }
+                            else { "cleared ${before - tasks.len()}" })
+    save()
     render()
 }
 
-// A value going back to JavaScript, so the host page can read Klang's state.
+// Escape clears the box, which is what everyone expects and nobody implements.
+export fn onKey(key: string) {
+    if key == "Escape" {
+        dom.setValue("#entry", "")
+        dom.setText("#message", "")
+    }
+}
+
+export fn onRoute() {
+    let h = dom.hash()
+    filter = if h == "#done" { "done" } else if h == "#todo" { "todo" } else { "all" }
+    render()
+}
+
+// Readable from JavaScript, so the host page can ask Klang how it is doing.
 export fn remaining() -> int {
     return list.count(tasks, |t| !t.done)
 }
 
-// `main` runs once when the page loads: it wires the buttons and draws the first
-// frame. Everything after that happens in the exported functions above.
+fn parseId(text: string) -> int {
+    return match str.parseInt(text) {
+        Ok(n)  => n,
+        Err(_) => -1,
+    }
+}
+
 fn main() {
-    push(tasks, Task { title: "write a language", done: true })
-    push(tasks, Task { title: "give it a garbage collector", done: true })
-    push(tasks, Task { title: "make it run in a browser", done: false })
+    load()
 
-    dom.on("#add", "click", "addTask")
-    dom.on("#complete", "click", "completeFirst")
+    dom.onSubmit("#form", "addTask")
+    dom.onKey("#entry", "keydown", "onKey")
+    dom.onChild("#list", "click", ".toggle", "toggleTask")
+    dom.onChild("#list", "click", ".delete", "deleteTask")
     dom.on("#clear", "click", "clearDone")
+    dom.onHashChange("onRoute")
 
-    render()
-    dom.log("klang: page ready")
+    onRoute()
+    dom.log("klang: ready, ${tasks.len()} tasks")
 }
