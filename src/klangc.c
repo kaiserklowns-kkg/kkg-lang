@@ -2201,6 +2201,25 @@ static Type *tc_call(Expr *e, Scope *sc, Type *expected) {
         if (mt->kind != TY_STRING) fail(e->line, "'assert' needs a string message, got %s", ty_str(mt));
         return ty_void();
     }
+    if (!shadowed && (strcmp(e->sval, "toInt") == 0 || strcmp(e->sval, "toFloat") == 0)) {
+        bool toInt = strcmp(e->sval, "toInt") == 0;
+        if (e->args.count != 1) fail(e->line, "'%s' takes exactly 1 argument", e->sval);
+        Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, toInt ? ty_float() : ty_int());
+        if (toInt && at->kind != TY_FLOAT)
+            fail(e->line, "'toInt' converts a float, got %s", ty_str(at));
+        if (!toInt && at->kind != TY_INT)
+            fail(e->line, "'toFloat' converts an int, got %s", ty_str(at));
+        return toInt ? ty_int() : ty_float();
+    }
+    if (!shadowed && (strcmp(e->sval, "wrapAdd") == 0 || strcmp(e->sval, "wrapSub") == 0 ||
+                      strcmp(e->sval, "wrapMul") == 0)) {
+        if (e->args.count != 2) fail(e->line, "'%s' takes 2 int arguments", e->sval);
+        for (int i = 0; i < 2; i++) {
+            Type *at = tc_expr(VEC_PTR(&e->args, i, Expr), sc, ty_int());
+            if (at->kind != TY_INT) fail(e->line, "'%s' needs ints, got %s", e->sval, ty_str(at));
+        }
+        return ty_int();
+    }
     if (!shadowed && strcmp(e->sval, "isNull") == 0) {
         if (e->args.count != 1) fail(e->line, "'isNull' takes exactly 1 argument");
         Type *at = tc_expr(VEC_PTR(&e->args, 0, Expr), sc, NULL);
@@ -3118,6 +3137,12 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
         case EX_IDENT: sb_append(out, e->sval); break;
         case EX_VARIANT: cg_variant_value(e->type, e->sval, &e->args, out, pre, ind); break;
         case EX_UNARY:
+            if (strcmp(e->op, "-") == 0 && e->type->kind == TY_INT) {
+                sb_append(out, "klang_neg(");     /* -INT64_MIN overflows */
+                cg_expr(e->lhs, out, pre, ind);
+                sb_append(out, ")");
+                break;
+            }
             sb_appendf(out, "(%s", e->op);
             cg_expr(e->lhs, out, pre, ind);
             sb_append(out, ")");
@@ -3150,6 +3175,30 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 bool pin = has_call(e->rhs);
                 bool str = e->lhs->type->kind == TY_STRING;
                 const char *op = e->op;
+
+                /* Integer arithmetic goes through checked helpers: signed overflow
+                   is undefined in C, and a wrong answer is worse than a stop. */
+                if (e->lhs->type->kind == TY_INT && e->type->kind == TY_INT) {
+                    const char *fn = strcmp(op, "+") == 0 ? "klang_add"
+                                   : strcmp(op, "-") == 0 ? "klang_sub"
+                                   : strcmp(op, "*") == 0 ? "klang_mul"
+                                   : strcmp(op, "/") == 0 ? "klang_div"
+                                   : strcmp(op, "%") == 0 ? "klang_mod" : NULL;
+                    /* Dividing by a literal that is neither 0 nor -1 cannot trap, so
+                       the check is dropped and the compiler keeps its usual
+                       strength reduction. */
+                    bool divlike = fn && (strcmp(op, "/") == 0 || strcmp(op, "%") == 0);
+                    if (divlike && e->rhs->kind == EX_INT && e->rhs->ival != 0 && e->rhs->ival != -1)
+                        fn = NULL;
+                    if (fn) {
+                        sb_appendf(out, "%s(", fn);
+                        cg_operand(e->lhs, out, pre, ind, pin);
+                        sb_append(out, ", ");
+                        cg_expr(e->rhs, out, pre, ind);
+                        sb_append(out, ")");
+                        break;
+                    }
+                }
                 if (str && strcmp(op, "+") == 0) sb_append(out, "klang_str_concat(");
                 else if (str && strcmp(op, "==") == 0) sb_append(out, "klang_str_eq(");
                 else if (str && strcmp(op, "!=") == 0) sb_append(out, "(!klang_str_eq(");
@@ -3301,6 +3350,22 @@ static void cg_expr(Expr *e, SB *out, SB *pre, int ind) {
                 cg_expr(VEC_PTR(&e->args, 0, Expr), out, pre, ind);
                 sb_append(out, ", ");
                 cg_expr(VEC_PTR(&e->args, 1, Expr), out, pre, ind);
+                sb_append(out, ")");
+                break;
+            }
+            if (strcmp(e->sval, "toInt") == 0 || strcmp(e->sval, "toFloat") == 0 ||
+                strcmp(e->sval, "wrapAdd") == 0 || strcmp(e->sval, "wrapSub") == 0 ||
+                strcmp(e->sval, "wrapMul") == 0) {
+                const char *cn = strcmp(e->sval, "toInt") == 0   ? "klang_to_int"
+                               : strcmp(e->sval, "toFloat") == 0 ? "klang_to_float"
+                               : strcmp(e->sval, "wrapAdd") == 0 ? "klang_wrap_add"
+                               : strcmp(e->sval, "wrapSub") == 0 ? "klang_wrap_sub"
+                                                                 : "klang_wrap_mul";
+                sb_appendf(out, "%s(", cn);
+                for (int i = 0; i < e->args.count; i++) {
+                    if (i) sb_append(out, ", ");
+                    cg_expr(VEC_PTR(&e->args, i, Expr), out, pre, ind);
+                }
                 sb_append(out, ")");
                 break;
             }
@@ -3758,6 +3823,72 @@ static const char *RUNTIME =
     "    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }\n"
     "    return h;\n"
     "}\n"
+    /* Signed overflow is undefined behaviour in C, so it cannot be left to chance:
+       every int operation is checked. GCC and Clang expose the hardware's own
+       overflow flag, which costs a single not-taken branch; the portable fallback
+       tests the operands first so any C99 compiler still builds this. */
+    "void klang_overflow(const char *op) {\n"
+    "    fprintf(stderr, \"klang: integer overflow in '%s'\\n\", op);\n"
+    "    exit(1);\n"
+    "}\n"
+    "void klang_divzero(const char *op) {\n"
+    "    fprintf(stderr, \"klang: %s by zero\\n\", op);\n"
+    "    exit(1);\n"
+    "}\n"
+    "#if defined(__GNUC__) || defined(__clang__)\n"
+    "  #define KLANG_CHK(fn, builtin, opname)                                      \\\n"
+    "    int64_t fn(int64_t a, int64_t b) {                                        \\\n"
+    "        int64_t r;                                                            \\\n"
+    "        if (builtin(a, b, &r)) klang_overflow(opname);                        \\\n"
+    "        return r;                                                             \\\n"
+    "    }\n"
+    "KLANG_CHK(klang_add, __builtin_add_overflow, \"+\")\n"
+    "KLANG_CHK(klang_sub, __builtin_sub_overflow, \"-\")\n"
+    "KLANG_CHK(klang_mul, __builtin_mul_overflow, \"*\")\n"
+    "#else\n"
+    "int64_t klang_add(int64_t a, int64_t b) {\n"
+    "    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) klang_overflow(\"+\");\n"
+    "    return a + b;\n"
+    "}\n"
+    "int64_t klang_sub(int64_t a, int64_t b) {\n"
+    "    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) klang_overflow(\"-\");\n"
+    "    return a - b;\n"
+    "}\n"
+    "int64_t klang_mul(int64_t a, int64_t b) {\n"
+    "    if (a != 0 && b != 0) {\n"
+    "        if (a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a)\n"
+    "                  : (b > 0 ? a < INT64_MIN / b : a < INT64_MAX / b)) klang_overflow(\"*\");\n"
+    "    }\n"
+    "    return a * b;\n"
+    "}\n"
+    "#endif\n"
+    "int64_t klang_neg(int64_t a) {\n"
+    "    if (a == INT64_MIN) klang_overflow(\"-\");\n"
+    "    return -a;\n"
+    "}\n"
+    /* INT64_MIN / -1 overflows, and division by zero traps on most hardware; both
+       become a message rather than a signal. */
+    "int64_t klang_div(int64_t a, int64_t b) {\n"
+    "    if (b == 0) klang_divzero(\"division\");\n"
+    "    if (a == INT64_MIN && b == -1) klang_overflow(\"/\");\n"
+    "    return a / b;\n"
+    "}\n"
+    "int64_t klang_mod(int64_t a, int64_t b) {\n"
+    "    if (b == 0) klang_divzero(\"remainder\");\n"
+    "    if (a == INT64_MIN && b == -1) return 0;\n"
+    "    return a % b;\n"
+    "}\n"
+    "int64_t klang_wrap_add(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }\n"
+    "int64_t klang_wrap_sub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }\n"
+    "int64_t klang_wrap_mul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }\n"
+    /* Out-of-range and NaN conversions are undefined in C, so they saturate here. */
+    "int64_t klang_to_int(double d) {\n"
+    "    if (d != d) return 0;\n"
+    "    if (d >= 9223372036854775808.0) return INT64_MAX;\n"
+    "    if (d <= -9223372036854775808.0) return INT64_MIN;\n"
+    "    return (int64_t)d;\n"
+    "}\n"
+    "double klang_to_float(int64_t v) { return (double)v; }\n"
     "void klang_bounds(int64_t i, int64_t len);\n"
     "/* Byte offsets, clamped rather than trusted, so slicing never reads out of range. */\n"
     "char *klang_substr(const char *s, int64_t start, int64_t end) {\n"
@@ -4130,7 +4261,7 @@ static void emit_lambda_body(Expr *lam, SB *sb) {
 }
 
 static void codegen(SB *sb) {
-    sb_append(sb, "/* Generated by klangc 0.9 — do not edit by hand */\n");
+    sb_append(sb, "/* Generated by klangc 0.10 — do not edit by hand */\n");
     sb_append(sb, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
     sb_append(sb, "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     sb_append(sb, "#include <stddef.h>\n#include <setjmp.h>\n");
@@ -4391,7 +4522,7 @@ static void load_module(const char *path, const char *importer, int line) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        printf("klangc — Klang compiler (0.9)\n\n"
+        printf("klangc — Klang compiler (0.10)\n\n"
                "Usage:\n"
                "  klangc <file.kkg>                Compile to output.c\n"
                "  klangc <file.kkg> -o <out.c>     Compile to a specific output file\n"
@@ -4399,7 +4530,7 @@ int main(int argc, char **argv) {
                "  klangc --help                    Show this help\n");
         return 0;
     }
-    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.9.0\n"); return 0; }
+    if (strcmp(argv[1], "--version") == 0) { printf("klangc 0.10.0\n"); return 0; }
 
     const char *in_path = argv[1];
     const char *out_path = "output.c";

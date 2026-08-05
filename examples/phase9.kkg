@@ -1,0 +1,82 @@
+// Phase 9: arithmetic that cannot lie.
+//
+// Signed overflow is undefined behaviour in C, and dividing by zero usually kills
+// the process with no message at all. Klang checks both, so a wrong answer is
+// never quietly produced and a crash always says what happened.
+
+import "std/list"
+
+const HASH_SEED = 1469598103934665603
+
+// Wrapping is a legitimate thing to want — hashing needs it — so it is available,
+// but you have to ask for it by name.
+fn hashOf(text: string) -> int {
+    let mut h = HASH_SEED
+    for i in 0..text.len() {
+        h = wrapMul(h, 1099511628211)
+        h = wrapAdd(h, text.byteAt(i))
+    }
+    return h
+}
+
+// Division is checked, so the safe thing to write is the obvious thing.
+fn average(xs: [int]) -> Option<float> {
+    if xs.len() == 0 {
+        return None
+    }
+    let total = xs.reduce(0, |acc, n| acc + n)
+    return Some(toFloat(total) / toFloat(xs.len()))
+}
+
+fn main() {
+    // ── conversions ───────────────────────────────────────────────────
+    println("toFloat(7)     = ${toFloat(7)}")
+    println("toInt(3.99)    = ${toInt(3.99)}")
+    println("toInt(-3.99)   = ${toInt(-3.99)}")
+
+    // Out-of-range and NaN saturate instead of being undefined.
+    println("toInt(1e30)    = ${toInt(1000000000000000000000000000000.0)}")
+
+    match average([3, 4, 5, 6]) {
+        Some(a) => println("average        = ${a}"),
+        None    => println("average        = (empty)"),
+    }
+    match average([]) {
+        Some(a) => println("average        = ${a}"),
+        None    => println("average of []  = none, as it should be"),
+    }
+
+    // ── the checks are real ───────────────────────────────────────────
+    // Each of these would abort with a message rather than wrap or crash:
+    //     let big = 9223372036854775807
+    //     big + 1        -> klang: integer overflow in '+'
+    //     0 - (-9223372036854775807 - 1)  -> klang: integer overflow in '-'
+    //     let z = 0
+    //     10 / z         -> klang: division by zero
+    //     10 % z         -> klang: remainder by zero
+    //
+    // So code that must not stop checks first, and the check is the whole story:
+    let divisor = 0
+    if divisor == 0 {
+        println("guarded        = refused to divide by zero")
+    } else {
+        println("guarded        = ${100 / divisor}")
+    }
+
+    // ── wrapping, when that is what you mean ──────────────────────────
+    let big = 9223372036854775807
+    println("wrapAdd(max,1) = ${wrapAdd(big, 1)}")
+    println("hash('klang')  = ${hashOf("klang")}")
+    println("hash('Klang')  = ${hashOf("Klang")}")
+    assert(hashOf("klang") != hashOf("Klang"), "hash must distinguish case")
+
+    // Dividing by a literal that cannot be zero costs nothing — the compiler
+    // drops the check, so ordinary code keeps ordinary speed.
+    let mut acc = 0
+    for i in 1..1000 {
+        acc += i % 7
+    }
+    println("checked loop   = ${acc}")
+
+    println("phase9: ok")
+}

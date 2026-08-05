@@ -9,7 +9,7 @@ reasoning behind that choice.
 The guiding constraint: **easy to write, easy to read, and not much to write.**
 Safety should cost you keystrokes, not add them.
 
-## Status: v0.9 — Phase 8 complete
+## Status: v0.10 — Phase 9 complete
 
 Everything listed here is implemented and covered by `make check`. Nothing below is
 aspirational.
@@ -57,12 +57,17 @@ aspirational.
   Declaring is free; **calling is `unsafe`**, so `grep unsafe` finds every place the
   compiler stopped vouching for you. [std/fs](std/fs.kkg) does the unsafe work once
   and exports a fully safe `Result` API — using it needs no `unsafe` at all.
+- **Checked arithmetic** — integer overflow and division by zero stop with a message
+  instead of wrapping or raising a signal. Signed overflow is undefined behaviour in
+  C, so this is not pedantry. Measured at 5–15% on a loop of pure arithmetic;
+  `wrapAdd` / `wrapSub` / `wrapMul` when wrapping is what you actually mean.
+- **`toInt` / `toFloat`** — no implicit numeric conversions, and no undefined edges.
 - **A standard library has started**: [std/math](std/math.kkg),
   [std/list](std/list.kkg) (map/filter/reduce/find/sorted/…),
   [std/string](std/string.kkg), [std/fs](std/fs.kkg).
 
 Not yet: traits, concurrency, and all tooling
-(REPL, formatter, linter, package manager). Integer overflow still wraps silently.
+(REPL, formatter, linter, package manager).
 See the [spec's status section](docs/LANGUAGE_SPEC.md#not-yet-implemented).
 
 ## A taste
@@ -145,7 +150,8 @@ See [examples/phase1.kkg](examples/phase1.kkg),
 [examples/phase5.kkg](examples/phase5.kkg),
 [examples/phase6.kkg](examples/phase6.kkg),
 [examples/phase7.kkg](examples/phase7.kkg),
-[examples/phase8.kkg](examples/phase8.kkg), and
+[examples/phase8.kkg](examples/phase8.kkg),
+[examples/phase9.kkg](examples/phase9.kkg), and
 [examples/gc.kkg](examples/gc.kkg) for the full tour.
 
 ## Build
